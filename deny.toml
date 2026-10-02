@@ -6,9 +6,10 @@ unmaintained = "all"
 yanked = "deny"
 
 [licenses]
-# Eigene Crates sind nicht veröffentlicht; Projektlizenz folgt per ADR.
+# Eigene Crates (GPL-3.0-or-later, ADR 0003) sind nicht veröffentlicht.
+# Erlaubt sind nur GPL-3.0-verträgliche Lizenzen.
 private = { ignore = true }
-allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0", "Unicode-3.0", "Zlib"]
 
 [bans]
 multiple-versions = "warn"

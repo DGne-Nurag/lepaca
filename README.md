@@ -29,3 +29,7 @@ cargo fmt --check
 ```
 
 Die Rust-Version ist in `rust-toolchain.toml` festgelegt und wird von `rustup` automatisch installiert.
+
+## Lizenz
+
+GPL-3.0-or-later, siehe [LICENSE](LICENSE) und [ADR 0003](docs/adr/0003-lizenz-gpl-3.md). Mit lepaca erstellte Schnittmuster gehören dir und fallen nicht unter die GPL.
