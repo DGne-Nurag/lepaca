@@ -477,6 +477,8 @@ async fn pdf_exportieren(
 
 /// Startet die Anwendung.
 pub fn starten() {
+    #[cfg(target_os = "linux")]
+    wayland::umgebung_absichern();
     let ergebnis = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![teil_geometrie, pdf_exportieren])
@@ -484,6 +486,56 @@ pub fn starten() {
     if let Err(e) = ergebnis {
         eprintln!("lepaca konnte nicht starten: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Umgehung für WebKitGTK unter Wayland.
+///
+/// Mit dem DMA-BUF-Renderer von WebKitGTK bricht die App auf manchen
+/// Wayland-Systemen sofort mit „Error 71 (Protokollfehler) dispatching to
+/// Wayland display“ ab. Abhilfe ist die Umgebungsvariable
+/// `WEBKIT_DISABLE_DMABUF_RENDERER=1`. Sie muss gesetzt sein, bevor GTK
+/// startet; `std::env::set_var` ist in Edition 2024 aber `unsafe` und damit
+/// bei uns verboten. Deshalb startet sich die App einmal selbst neu (per
+/// `exec`, ohne zweiten Prozess) mit der ergänzten Umgebung.
+///
+/// Wer die Variable selbst setzt (auch auf `0`), behält seinen Wert.
+#[cfg(target_os = "linux")]
+mod wayland {
+    use std::ffi::OsString;
+
+    const DMABUF: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    const SCHON_NEU_GESTARTET: &str = "LEPACA_UMGEBUNG_GESETZT";
+
+    /// Welche Variablen für den Neustart ergänzt werden müssen; leer heißt:
+    /// kein Neustart nötig.
+    pub(crate) fn fehlende_variablen(
+        lesen: impl Fn(&str) -> Option<OsString>,
+    ) -> Vec<(&'static str, &'static str)> {
+        let wayland = lesen("WAYLAND_DISPLAY").is_some_and(|w| !w.is_empty())
+            || lesen("XDG_SESSION_TYPE").is_some_and(|t| t == "wayland");
+        if !wayland || lesen(SCHON_NEU_GESTARTET).is_some() || lesen(DMABUF).is_some() {
+            return Vec::new();
+        }
+        vec![(DMABUF, "1"), (SCHON_NEU_GESTARTET, "1")]
+    }
+
+    pub(crate) fn umgebung_absichern() {
+        use std::os::unix::process::CommandExt;
+
+        let fehlend = fehlende_variablen(|k| std::env::var_os(k));
+        if fehlend.is_empty() {
+            return;
+        }
+        let Ok(programm) = std::env::current_exe() else {
+            return;
+        };
+        let fehler = std::process::Command::new(programm)
+            .args(std::env::args_os().skip(1))
+            .envs(fehlend)
+            .exec();
+        // `exec` kehrt nur bei einem Fehler zurück; dann ohne Umgehung weiter.
+        eprintln!("lepaca: Neustart mit {DMABUF}=1 fehlgeschlagen: {fehler}");
     }
 }
 
@@ -592,5 +644,54 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF-1.4"));
         assert_eq!(blaetter, 2);
         assert_eq!(super::pdf(&[], &druck).unwrap_err(), "export.leer");
+    }
+
+    #[cfg(target_os = "linux")]
+    mod wayland_start {
+        use crate::wayland::fehlende_variablen;
+        use std::ffi::OsString;
+
+        fn umgebung(paare: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+            let paare: Vec<(String, String)> = paare
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            move |k| {
+                paare
+                    .iter()
+                    .find(|(kk, _)| kk == k)
+                    .map(|(_, v)| OsString::from(v))
+            }
+        }
+
+        #[test]
+        fn unter_wayland_wird_der_dmabuf_renderer_abgeschaltet() {
+            let v = fehlende_variablen(umgebung(&[("WAYLAND_DISPLAY", "wayland-0")]));
+            assert!(v.contains(&("WEBKIT_DISABLE_DMABUF_RENDERER", "1")));
+        }
+
+        #[test]
+        fn unter_x11_bleibt_alles_wie_es_ist() {
+            let v = fehlende_variablen(umgebung(&[("DISPLAY", ":0"), ("XDG_SESSION_TYPE", "x11")]));
+            assert!(v.is_empty());
+        }
+
+        #[test]
+        fn eigene_einstellung_des_nutzers_wird_respektiert() {
+            let v = fehlende_variablen(umgebung(&[
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("WEBKIT_DISABLE_DMABUF_RENDERER", "0"),
+            ]));
+            assert!(v.is_empty());
+        }
+
+        #[test]
+        fn nach_dem_neustart_startet_die_app_nicht_endlos_neu() {
+            let v = fehlende_variablen(umgebung(&[
+                ("XDG_SESSION_TYPE", "wayland"),
+                ("LEPACA_UMGEBUNG_GESETZT", "1"),
+            ]));
+            assert!(v.is_empty());
+        }
     }
 }
