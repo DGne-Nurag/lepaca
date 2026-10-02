@@ -1,6 +1,6 @@
 //! Sicheres Schreiben von Dateien (Playbook 04).
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -38,7 +38,7 @@ pub fn atomar_schreiben(ziel: &Path, inhalt: &[u8], ueberschreiben: bool) -> io:
         // Den Ordner synchronisieren, damit die Umbenennung selbst dauerhaft ist
         // (unter Windows nicht möglich und nicht nötig).
         #[cfg(unix)]
-        File::open(ordner)?.sync_all()?;
+        fs::File::open(ordner)?.sync_all()?;
         Ok(())
     })();
     if ergebnis.is_err() {
