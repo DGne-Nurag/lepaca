@@ -1,14 +1,15 @@
 //! Kommandozeile für lepaca.
 //!
 //! Beispiel:
-//! `lepaca svg --form rechteck --breite 80 --hoehe 50 --radius 5
-//!  --eisen diamant --lochabstand 3.85 --kantenabstand 3 --ausgabe teil.svg`
+//! `lepaca pdf --form rechteck --breite 300 --hoehe 200 --radius 5
+//!  --eisen diamond --lochabstand 3.85 --kantenabstand 3 --ausgabe teil.pdf`
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use lepaca_core::eisen::Eisenart;
 use lepaca_core::form::Form;
+use lepaca_core::kachelung::{Einstellung as KachelEinstellung, Papier, kacheln};
 use lepaca_core::mass::Mm;
 use lepaca_core::stichlinie::{Eckausrichtung, Einstellung, stichreihe};
 
@@ -16,7 +17,8 @@ const HILFE: &str = "\
 lepaca – Leather Pattern CAD
 
 Aufruf:
-  lepaca svg [Optionen]
+  lepaca svg [Optionen]   Teil als ein SVG in Originalgröße
+  lepaca pdf [Optionen]   Teil als PDF, auf Blätter gekachelt, mit Prüfseite
 
 Optionen (alle Maße in Millimetern):
   --form rechteck|kreis|ellipse   Grundform (Standard: rechteck)
@@ -29,7 +31,10 @@ Optionen (alle Maße in Millimetern):
   --kantenabstand <mm>            Abstand der Naht zur Kante (Standard: 3)
   --ecke ein|aus|mitte            Ausrichtung des Ecklochs (Standard: ein,
                                   wie die einlaufende Kante)
-  --ausgabe <datei.svg>           Zieldatei
+  --papier a4|a3|letter           Papierformat für PDF (Standard: a4)
+  --rand <mm>                     Unbedruckter Blattrand für PDF (Standard: 10)
+  --klebekante <mm>               Überlappung der Blätter für PDF (Standard: 10)
+  --ausgabe <datei>               Zieldatei
   --ueberschreiben                Vorhandene Datei ersetzen
   --version                       Version anzeigen
 ";
@@ -48,6 +53,9 @@ struct Optionen {
     lochabstand: Option<f64>,
     kantenabstand: Option<f64>,
     ecke: Option<String>,
+    papier: Option<String>,
+    rand: Option<f64>,
+    klebekante: Option<f64>,
     ausgabe: Option<PathBuf>,
     ueberschreiben: bool,
 }
@@ -72,7 +80,8 @@ fn ausfuehren(args: &[String]) -> Result<String, String> {
     }
     match args.first().map(String::as_str) {
         Some("--version") => Ok(format!("lepaca {}", env!("CARGO_PKG_VERSION"))),
-        Some("svg") => svg(lies_optionen(&args[1..])?),
+        Some("svg") => erzeugen(lies_optionen(&args[1..])?, Format::Svg),
+        Some("pdf") => erzeugen(lies_optionen(&args[1..])?, Format::Pdf),
         _ => Ok(HILFE.into()),
     }
 }
@@ -105,6 +114,9 @@ fn lies_optionen(args: &[String]) -> Result<Optionen, String> {
             "--lochabstand" => o.lochabstand = Some(zahl(a, it.next())?),
             "--kantenabstand" => o.kantenabstand = Some(zahl(a, it.next())?),
             "--ecke" => o.ecke = it.next().cloned(),
+            "--papier" => o.papier = it.next().cloned(),
+            "--rand" => o.rand = Some(zahl(a, it.next())?),
+            "--klebekante" => o.klebekante = Some(zahl(a, it.next())?),
             "--ausgabe" => o.ausgabe = it.next().map(PathBuf::from),
             "--ueberschreiben" => o.ueberschreiben = true,
             _ => return Err(format!("Unbekannte Option „{a}“. Hilfe: lepaca --hilfe")),
@@ -118,7 +130,13 @@ fn mm(name: &str, x: Option<f64>) -> Result<Mm, String> {
     Mm::neu(x).map_err(|e| format!("--{name}: {e}"))
 }
 
-fn svg(o: Optionen) -> Result<String, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    Svg,
+    Pdf,
+}
+
+fn erzeugen(o: Optionen, format: Format) -> Result<String, String> {
     let form = match o.form.as_deref().unwrap_or("rechteck") {
         "rechteck" => Form::Rechteck {
             breite: mm("breite", o.breite)?,
@@ -170,22 +188,56 @@ fn svg(o: Optionen) -> Result<String, String> {
         .map_err(|e| format!("Die Form ist ungültig: {e:?}"))?;
     let reihe =
         stichreihe(&kontur, einstellung).map_err(|e| format!("Keine Stichreihe möglich: {e:?}"))?;
-    let svg = lepaca_io::svg::teil(&kontur, &reihe, &eisen.lochform(einstellung.lochabstand));
-    lepaca_io::datei::atomar_schreiben(&ausgabe, svg.as_bytes(), o.ueberschreiben).map_err(
-        |e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                format!(
-                    "{} gibt es schon. Mit --ueberschreiben ersetzen.",
-                    ausgabe.display()
-                )
-            } else {
-                format!("{} konnte nicht gespeichert werden: {e}", ausgabe.display())
-            }
-        },
-    )?;
+    let lochform = eisen.lochform(einstellung.lochabstand);
+    let mut blaetter = String::new();
+    let inhalt = match format {
+        Format::Svg => lepaca_io::svg::teil(&kontur, &reihe, &lochform).into_bytes(),
+        Format::Pdf => {
+            let papier = match o.papier.as_deref().unwrap_or("a4") {
+                "a4" => Papier::A4,
+                "a3" => Papier::A3,
+                "letter" => Papier::LETTER,
+                p => {
+                    return Err(format!(
+                        "Unbekanntes Papierformat „{p}“. Möglich: a4, a3, letter."
+                    ));
+                }
+            };
+            let kachel_einstellung = KachelEinstellung {
+                papier,
+                rand: mm("rand", Some(o.rand.unwrap_or(10.0)))?,
+                klebekante: mm("klebekante", Some(o.klebekante.unwrap_or(10.0)))?,
+            };
+            let (von, bis) = kontur.grenzen();
+            let plan = kacheln(von, bis, kachel_einstellung)
+                .map_err(|e| format!("Keine Aufteilung auf Blätter möglich: {e:?}"))?;
+            blaetter = format!(
+                "\n{} ({} × {}, {}) plus Prüfseite",
+                if plan.kacheln.len() == 1 {
+                    "1 Blatt".to_string()
+                } else {
+                    format!("{} Blätter", plan.kacheln.len())
+                },
+                plan.zeilen,
+                plan.spalten,
+                if plan.hochformat { "hoch" } else { "quer" }
+            );
+            lepaca_io::pdf::teil_gekachelt(&kontur, &reihe, &lochform, &plan)
+        }
+    };
+    lepaca_io::datei::atomar_schreiben(&ausgabe, &inhalt, o.ueberschreiben).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "{} gibt es schon. Mit --ueberschreiben ersetzen.",
+                ausgabe.display()
+            )
+        } else {
+            format!("{} konnte nicht gespeichert werden: {e}", ausgabe.display())
+        }
+    })?;
 
     let mut meldung = format!(
-        "{} Stichlöcher, gespeichert in {}",
+        "{} Stichlöcher, gespeichert in {}{blaetter}",
         reihe.loecher.len(),
         ausgabe.display()
     );
@@ -193,7 +245,8 @@ fn svg(o: Optionen) -> Result<String, String> {
     let abweichend: Vec<String> = reihe
         .abschnitte
         .iter()
-        .filter(|a| !a.lochabstand.etwa_gleich(einstellung.lochabstand))
+        // Nur melden, was man in der Anzeige (zwei Nachkommastellen) sieht.
+        .filter(|a| (a.lochabstand.wert() - einstellung.lochabstand.wert()).abs() >= 0.005)
         .map(|a| format!("{:.2}", a.lochabstand.wert()).replace('.', ","))
         .collect();
     if !abweichend.is_empty() {

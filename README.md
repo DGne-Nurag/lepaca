@@ -16,7 +16,7 @@ Status: frühe Entwicklung, noch nicht benutzbar.
 | Pfad | Inhalt |
 |---|---|
 | `crates/lepaca-core` | Geometrie-Kern in Rust, ohne I/O |
-| `crates/lepaca-io` | Export (SVG) und sicheres Speichern |
+| `crates/lepaca-io` | Export (SVG, gekacheltes PDF) und sicheres Speichern |
 | `crates/lepaca-cli` | Kommandozeile (Export ohne Oberfläche) |
 | `docs/playbooks` | Verbindliche Grundregeln (Security, Usability, Architektur …) |
 | `docs/adr` | Architekturentscheidungen |
