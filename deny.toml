@@ -1,0 +1,19 @@
+# Lieferkettenprüfung (Playbook 06), läuft in CI über cargo-deny.
+
+[advisories]
+# Bekannte Sicherheitslücken und nicht mehr gepflegte Crates blockieren.
+unmaintained = "all"
+yanked = "deny"
+
+[licenses]
+# Eigene Crates sind nicht veröffentlicht; Projektlizenz folgt per ADR.
+private = { ignore = true }
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,17 @@
+[package]
+name = "lepaca-cli"
+description = "Kommandozeile für lepaca (Export ohne Oberfläche)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lepaca"
+path = "src/main.rs"
+
+[dependencies]
+lepaca-core = { path = "../lepaca-core" }
+
+[lints]
+workspace = true
