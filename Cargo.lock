@@ -7,8 +7,16 @@ name = "lepaca-cli"
 version = "0.0.0"
 dependencies = [
  "lepaca-core",
+ "lepaca-io",
 ]
 
 [[package]]
 name = "lepaca-core"
 version = "0.0.0"
+
+[[package]]
+name = "lepaca-io"
+version = "0.0.0"
+dependencies = [
+ "lepaca-core",
+]
