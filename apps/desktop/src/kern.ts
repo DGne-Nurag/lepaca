@@ -3,12 +3,12 @@
 // Berechnung.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { Druck, Teil } from "./modell";
-
-type P = [number, number];
+import type { Druck, P, Teil } from "./modell";
 
 export interface Geometrie {
   kontur: P[];
+  /** false: offene Linie, nicht füllen. */
+  geschlossen: boolean;
   linien: { punkte: P[]; geschlossen: boolean }[];
   loecher: [P, P, P, P][];
   ecklocher: number;
@@ -44,10 +44,17 @@ function pfad(punkte: P[], geschlossen = true): Path2D {
 }
 
 const cache = new Map<string, Pfade>();
+/** Fehlercodes des Kerns je Form, z. B. ein unmöglicher Bogenradius. */
+const fehler = new Map<string, string>();
 const laufend = new Map<string, Promise<Pfade>>();
 
 function schluessel(t: Teil): string {
   return JSON.stringify([t.form, t.naht]);
+}
+
+/** Fehlercode, falls der Kern die Form abgelehnt hat. */
+export function formFehler(t: Teil): string | undefined {
+  return fehler.get(schluessel(t));
 }
 
 /** Geometrie aus dem Zwischenspeicher, falls vorhanden. */
@@ -60,6 +67,8 @@ export async function pfadeFuer(t: Teil): Promise<Pfade> {
   const s = schluessel(t);
   const da = cache.get(s);
   if (da) return da;
+  const abgelehnt = fehler.get(s);
+  if (abgelehnt) throw abgelehnt;
   const offen = laufend.get(s);
   if (offen) return offen;
   const p = invoke<Geometrie>("teil_geometrie", { teil: teilDaten(t, 0, 0) }).then((g) => {
@@ -73,13 +82,17 @@ export async function pfadeFuer(t: Teil): Promise<Pfade> {
       min = [Math.min(min[0], x), Math.min(min[1], y)];
       max = [Math.max(max[0], x), Math.max(max[1], y)];
     }
-    const fertig: Pfade = { geometrie: g, kontur: pfad(g.kontur), linie, loecher, min, max };
+    const fertig: Pfade = { geometrie: g, kontur: pfad(g.kontur, g.geschlossen), linie, loecher, min, max };
     if (cache.size > 2000) cache.clear();
     cache.set(s, fertig);
     laufend.delete(s);
     return fertig;
   });
-  p.catch(() => laufend.delete(s));
+  p.catch((e: unknown) => {
+    laufend.delete(s);
+    if (fehler.size > 2000) fehler.clear();
+    fehler.set(s, String(e));
+  });
   laufend.set(s, p);
   return p;
 }
