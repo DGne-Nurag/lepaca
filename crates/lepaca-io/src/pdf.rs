@@ -95,8 +95,12 @@ fn kachelseite(
         let _ = writeln!(s, "s");
         if let Some((stiche, loch)) = teil.stiche {
             let _ = writeln!(s, "0.5 G 0.1 w [1 1] 0 d");
-            pfad(&mut s, stiche.linie.punkte());
-            let _ = writeln!(s, "s [] 0 d 0 g");
+            for linie in &stiche.linien {
+                linienzug(&mut s, &linie.punkte);
+                // Geschlossen: schließen und zeichnen; offen: nur zeichnen.
+                let _ = writeln!(s, "{}", if linie.geschlossen { "h S" } else { "S" });
+            }
+            let _ = writeln!(s, "[] 0 d 0 g");
             let halb = loch.laenge.max(loch.breite);
             for l in &stiche.loecher {
                 let m = l.mitte;
@@ -229,6 +233,12 @@ fn mm_koordinaten(s: &mut String, blatt_hoehe: f64) {
 }
 
 fn pfad(s: &mut String, punkte: &[Punkt]) {
+    linienzug(s, punkte);
+    let _ = writeln!(s, "h");
+}
+
+/// Linienzug ohne ihn zu schließen.
+fn linienzug(s: &mut String, punkte: &[Punkt]) {
     for (i, p) in punkte.iter().enumerate() {
         let _ = writeln!(
             s,
@@ -238,7 +248,6 @@ fn pfad(s: &mut String, punkte: &[Punkt]) {
             if i == 0 { "m" } else { "l" }
         );
     }
-    let _ = writeln!(s, "h");
 }
 
 fn passkreuz(s: &mut String, x: f64, y: f64) {

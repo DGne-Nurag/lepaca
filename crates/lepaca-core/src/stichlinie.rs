@@ -66,11 +66,19 @@ pub struct Abschnitt {
     pub lochabstand: Mm,
 }
 
-/// Ergebnis: Stichlinie, Löcher und die Abschnitte für die Anzeige
+/// Ein Stück Stichlinie. Geschlossen läuft es einmal ringsum, offen hat es
+/// einen Anfang und ein Ende (Naht nur an einzelnen Kanten).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Linienzug {
+    pub punkte: Vec<Punkt>,
+    pub geschlossen: bool,
+}
+
+/// Ergebnis: Stichlinie(n), Löcher und die Abschnitte für die Anzeige
 /// („Abstand angepasst auf 3,92 mm").
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stichreihe {
-    pub linie: Kontur,
+    pub linien: Vec<Linienzug>,
     pub loecher: Vec<Stichloch>,
     pub abschnitte: Vec<Abschnitt>,
 }
@@ -81,6 +89,10 @@ pub enum StichFehler {
     LochabstandAusserhalb,
     KantenabstandAusserhalb,
     ZuVieleLoecher,
+    /// Die Kantenauswahl passt nicht zur Form, oder die Stichlinie hat
+    /// durch den Kantenabstand Kanten verloren und lässt sich den
+    /// gewählten Kanten nicht mehr zuordnen.
+    KantenUnpassend,
     Versatz(VersatzFehler),
 }
 
@@ -90,73 +102,167 @@ impl From<VersatzFehler> for StichFehler {
     }
 }
 
-/// Setzt die Stichlöcher für ein Teil mit der Schnittkante `kontur`.
-pub fn stichreihe(kontur: &Kontur, e: Einstellung) -> Result<Stichreihe, StichFehler> {
+fn pruefe(e: Einstellung) -> Result<(), StichFehler> {
     if !LOCHABSTAND_MM.contains(&e.lochabstand.wert()) {
         return Err(StichFehler::LochabstandAusserhalb);
     }
     if !KANTENABSTAND_MM.contains(&e.kantenabstand.wert()) {
         return Err(StichFehler::KantenabstandAusserhalb);
     }
+    Ok(())
+}
+
+/// Setzt die Stichlöcher ringsum für ein Teil mit der Schnittkante `kontur`.
+pub fn stichreihe(kontur: &Kontur, e: Einstellung) -> Result<Stichreihe, StichFehler> {
+    pruefe(e)?;
     let linie = versatz::nach_innen(kontur, e.kantenabstand)?;
     let n = linie.len();
     let ecken: Vec<usize> = (0..n).filter(|&i| linie.ist_ecke(i)).collect();
     // Ohne Ecken: ein einziger Abschnitt ringsum, beginnend bei Punkt 0.
     let starts = if ecken.is_empty() { vec![0] } else { ecken };
 
-    let p = e.lochabstand.wert();
-    let mut loecher = Vec::new();
-    let mut abschnitte = Vec::new();
+    let mut r = Stichreihe {
+        linien: vec![Linienzug {
+            punkte: linie.punkte().to_vec(),
+            geschlossen: true,
+        }],
+        loecher: Vec::new(),
+        abschnitte: Vec::new(),
+    };
     for (k, &von) in starts.iter().enumerate() {
         let bis = starts[(k + 1) % starts.len()];
         let schritte = if bis > von { bis - von } else { bis + n - von };
-        let laenge: f64 = (0..schritte)
-            .map(|i| linie.punkt(von + i).abstand(linie.punkt(von + i + 1)))
-            .sum();
-        let abstaende = ((laenge / p).round() as usize).max(1);
-        if loecher.len() + abstaende > MAX_LOECHER {
-            return Err(StichFehler::ZuVieleLoecher);
-        }
-        let ist = laenge / abstaende as f64;
-        abschnitte.push(Abschnitt {
-            laenge: Mm::neu(laenge).map_err(|_| StichFehler::ZuVieleLoecher)?,
-            abstaende,
-            lochabstand: Mm::neu(ist).map_err(|_| StichFehler::ZuVieleLoecher)?,
-        });
-
-        // Entlang des Abschnitts laufen und bei jedem Vielfachen von `ist`
-        // ein Loch setzen. Das Endloch gehört zum nächsten Abschnitt.
-        let auf_ecke = linie.ist_ecke(von);
-        loecher.push(Stichloch {
+        let start = Stichloch {
             mitte: linie.punkt(von),
             richtung: richtung_an_punkt(&linie, von, e.ecke),
-            auf_ecke,
-        });
-        let mut gelaufen = 0.0;
-        let mut naechstes = 1;
-        for i in 0..schritte {
-            let a = linie.punkt(von + i);
-            let b = linie.punkt(von + i + 1);
-            let kante = a.abstand(b);
-            while naechstes < abstaende && (naechstes as f64) * ist <= gelaufen + kante {
-                let t = ((naechstes as f64) * ist - gelaufen) / kante;
-                let richtung = b.minus(a).normiert().unwrap_or(Punkt::neu(1.0, 0.0));
-                loecher.push(Stichloch {
-                    mitte: a.plus(b.minus(a).mal(t)),
-                    richtung,
-                    auf_ecke: false,
-                });
-                naechstes += 1;
-            }
-            gelaufen += kante;
-        }
+            auf_ecke: linie.ist_ecke(von),
+        };
+        abschnitt_legen(&mut r, |i| linie.punkt(von + i), schritte, start, e)?;
+    }
+    Ok(r)
+}
+
+/// Setzt Stichlöcher nur an den gewählten Kanten. `kanten[i]` steht für die
+/// Kante von Punkt `i` zu Punkt `i + 1` der Kontur. Aufeinanderfolgende
+/// gewählte Kanten bilden eine durchgehende Naht; jede Naht beginnt und
+/// endet mit einem Loch. Sind alle Kanten gewählt, ist das dasselbe wie
+/// [`stichreihe`].
+pub fn stichreihe_an_kanten(
+    kontur: &Kontur,
+    kanten: &[bool],
+    e: Einstellung,
+) -> Result<Stichreihe, StichFehler> {
+    pruefe(e)?;
+    let n = kontur.len();
+    if kanten.len() != n {
+        return Err(StichFehler::KantenUnpassend);
+    }
+    if kanten.iter().all(|&k| k) {
+        return stichreihe(kontur, e);
+    }
+    let linie = versatz::nach_innen(kontur, e.kantenabstand)?;
+    // Ohne gleiche Punktzahl lässt sich Kante i nicht mehr Kante i der
+    // Stichlinie zuordnen.
+    if linie.len() != n {
+        return Err(StichFehler::KantenUnpassend);
     }
 
-    Ok(Stichreihe {
-        linie,
-        loecher,
-        abschnitte,
-    })
+    let mut r = Stichreihe {
+        linien: Vec::new(),
+        loecher: Vec::new(),
+        abschnitte: Vec::new(),
+    };
+    // Jede Naht beginnt an einer gewählten Kante, deren Vorgängerin nicht
+    // gewählt ist.
+    for start in (0..n).filter(|&i| kanten[i] && !kanten[(i + n - 1) % n]) {
+        let laenge = (0..n).take_while(|&k| kanten[(start + k) % n]).count();
+        let punkte: Vec<Punkt> = (0..=laenge).map(|k| linie.punkt(start + k)).collect();
+        // Innerhalb der Naht an den Ecken teilen, wie ringsum.
+        let mut teil_start = 0;
+        for k in 1..=laenge {
+            if k < laenge && !linie.ist_ecke(start + k) {
+                continue;
+            }
+            let von = teil_start;
+            let richtung = if von == 0 {
+                punkte[1]
+                    .minus(punkte[0])
+                    .normiert()
+                    .unwrap_or(Punkt::neu(1.0, 0.0))
+            } else {
+                richtung_an_punkt(&linie, start + von, e.ecke)
+            };
+            let anfang = Stichloch {
+                mitte: punkte[von],
+                richtung,
+                auf_ecke: von > 0 || linie.ist_ecke(start),
+            };
+            abschnitt_legen(&mut r, |i| punkte[von + i], k - von, anfang, e)?;
+            teil_start = k;
+        }
+        // Endloch der offenen Naht.
+        let ende = punkte[laenge];
+        r.loecher.push(Stichloch {
+            mitte: ende,
+            richtung: ende
+                .minus(punkte[laenge - 1])
+                .normiert()
+                .unwrap_or(Punkt::neu(1.0, 0.0)),
+            auf_ecke: linie.ist_ecke(start + laenge),
+        });
+        r.linien.push(Linienzug {
+            punkte,
+            geschlossen: false,
+        });
+    }
+    Ok(r)
+}
+
+/// Verteilt die Löcher auf einem Abschnitt mit `schritte` Kanten, dessen
+/// Punkte `punkt(0..=schritte)` liefert. Setzt das Anfangsloch und alle
+/// Zwischenlöcher; das Endloch gehört zum nächsten Abschnitt.
+fn abschnitt_legen(
+    r: &mut Stichreihe,
+    punkt: impl Fn(usize) -> Punkt,
+    schritte: usize,
+    anfang: Stichloch,
+    e: Einstellung,
+) -> Result<(), StichFehler> {
+    let p = e.lochabstand.wert();
+    let laenge: f64 = (0..schritte).map(|i| punkt(i).abstand(punkt(i + 1))).sum();
+    let abstaende = ((laenge / p).round() as usize).max(1);
+    if r.loecher.len() + abstaende > MAX_LOECHER {
+        return Err(StichFehler::ZuVieleLoecher);
+    }
+    let ist = laenge / abstaende as f64;
+    r.abschnitte.push(Abschnitt {
+        laenge: Mm::neu(laenge).map_err(|_| StichFehler::ZuVieleLoecher)?,
+        abstaende,
+        lochabstand: Mm::neu(ist).map_err(|_| StichFehler::ZuVieleLoecher)?,
+    });
+
+    // Entlang des Abschnitts laufen und bei jedem Vielfachen von `ist`
+    // ein Loch setzen.
+    r.loecher.push(anfang);
+    let mut gelaufen = 0.0;
+    let mut naechstes = 1;
+    for i in 0..schritte {
+        let a = punkt(i);
+        let b = punkt(i + 1);
+        let kante = a.abstand(b);
+        while naechstes < abstaende && (naechstes as f64) * ist <= gelaufen + kante {
+            let t = ((naechstes as f64) * ist - gelaufen) / kante;
+            let richtung = b.minus(a).normiert().unwrap_or(Punkt::neu(1.0, 0.0));
+            r.loecher.push(Stichloch {
+                mitte: a.plus(b.minus(a).mal(t)),
+                richtung,
+                auf_ecke: false,
+            });
+            naechstes += 1;
+        }
+        gelaufen += kante;
+    }
+    Ok(())
 }
 
 /// Nahtrichtung an einem Punkt der Linie. Auf einer Ecke entscheidet die
@@ -364,5 +470,70 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn t_pocket() -> Kontur {
+        Form::TPocket {
+            breite: mm(101.6),
+            hoehe: mm(44.5),
+            fluegel_ueberstand: mm(12.7),
+            fluegel_hoehe: mm(12.0),
+        }
+        .kontur()
+        .unwrap()
+    }
+
+    #[test]
+    fn eine_t_pocket_wird_an_fluegeln_und_steg_genaeht_aber_nicht_an_der_oeffnung() {
+        let kanten = crate::form::TPocketNaehte::default().kanten();
+        let r = stichreihe_an_kanten(&t_pocket(), &kanten, einstellung(3.0, 3.0)).unwrap();
+        // Drei getrennte Nähte: Flügel rechts, Steg unten, Flügel links.
+        assert_eq!(r.linien.len(), 3);
+        assert!(r.linien.iter().all(|l| !l.geschlossen));
+        for l in &r.loecher {
+            let p = l.mitte;
+            let am_fluegel = ((p.x - 3.0).abs() < TOLERANZ_MM || (p.x - 98.6).abs() < TOLERANZ_MM)
+                && p.y >= 3.0 - TOLERANZ_MM
+                && p.y <= 9.0 + TOLERANZ_MM;
+            let am_steg = (p.y - 41.5).abs() < TOLERANZ_MM
+                && p.x >= 15.7 - TOLERANZ_MM
+                && p.x <= 85.9 + TOLERANZ_MM;
+            assert!(am_fluegel || am_steg, "Loch an falscher Stelle: {p:?}");
+        }
+    }
+
+    #[test]
+    fn jede_offene_naht_beginnt_und_endet_mit_einem_loch() {
+        let kanten = crate::form::TPocketNaehte::default().kanten();
+        let r = stichreihe_an_kanten(&t_pocket(), &kanten, einstellung(3.0, 2.7)).unwrap();
+        for l in &r.linien {
+            for ende in [l.punkte[0], l.punkte[l.punkte.len() - 1]] {
+                assert!(
+                    r.loecher
+                        .iter()
+                        .any(|h| h.mitte.abstand(ende) < TOLERANZ_MM),
+                    "kein Loch am Nahtende {ende:?}"
+                );
+            }
+        }
+        // Steg unten: 70,2 mm / 2,7 = 26 Abstände → 27 Löcher; Flügel je
+        // 6 mm / 2,7 → 2 Abstände → 3 Löcher.
+        assert_eq!(r.loecher.len(), 27 + 3 + 3);
+    }
+
+    #[test]
+    fn naht_an_allen_kanten_ist_dieselbe_wie_ringsum() {
+        let k = rechteck(80.0, 50.0, 0.0);
+        let e = einstellung(3.0, 3.85);
+        assert_eq!(stichreihe_an_kanten(&k, &[true; 4], e), stichreihe(&k, e));
+    }
+
+    #[test]
+    fn eine_kantenwahl_die_nicht_zur_form_passt_wird_abgewiesen() {
+        let k = rechteck(80.0, 50.0, 0.0);
+        assert_eq!(
+            stichreihe_an_kanten(&k, &[true, false], einstellung(3.0, 3.0)),
+            Err(StichFehler::KantenUnpassend)
+        );
     }
 }

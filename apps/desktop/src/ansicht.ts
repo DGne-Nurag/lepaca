@@ -10,7 +10,7 @@ import type { Muster, Teil } from "./modell";
 export const PX_PRO_MM = 96 / 25.4;
 
 export interface Vorschau {
-  art: "rechteck" | "kreis" | "ellipse";
+  art: "rechteck" | "kreis" | "ellipse" | "tpocket";
   x: number;
   y: number;
   breite: number;
@@ -113,6 +113,19 @@ export class Ansicht {
       c.beginPath();
       if (vorschau.art === "rechteck") {
         c.rect(vorschau.x, vorschau.y, vorschau.breite, vorschau.hoehe);
+      } else if (vorschau.art === "tpocket") {
+        const { x, y, breite: b, hoehe: h } = vorschau;
+        const u = Math.min(12.7, Math.max(0, (b - 10) / 2));
+        const fh = Math.min(12, h / 3);
+        c.moveTo(x, y);
+        c.lineTo(x + b, y);
+        c.lineTo(x + b, y + fh);
+        c.lineTo(x + b - u, y + fh);
+        c.lineTo(x + b - u, y + h);
+        c.lineTo(x + u, y + h);
+        c.lineTo(x + u, y + fh);
+        c.lineTo(x, y + fh);
+        c.closePath();
       } else {
         c.ellipse(
           vorschau.x + vorschau.breite / 2,
@@ -139,7 +152,7 @@ export class Ansicht {
     c.strokeStyle = gewaehlt ? farbe("--auswahl") : farbe("--kante");
     c.stroke(p.kontur);
 
-    if (p.geometrie.linie.length > 0) {
+    if (p.geometrie.linien.length > 0) {
       const loch = t.naht ? t.naht.lochabstand * this.massstab : 0;
       if (loch >= 4) {
         // Nah genug: jedes Loch zeichnen.

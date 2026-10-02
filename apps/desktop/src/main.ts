@@ -2,10 +2,10 @@
 
 import { Ansicht, PX_PRO_MM, type Vorschau } from "./ansicht";
 import { enthaelt, pdfExportieren, pfadeFuer, pfadeSofort } from "./kern";
-import { neueId, neuesMuster, Verlauf, type Ecke, type Eisen, type Form, type Muster, type Teil } from "./modell";
+import { neueId, neuesMuster, neueTPocket, Verlauf, type Ecke, type Eisen, type Form, type Muster, type Teil } from "./modell";
 import { fehlertext, leseZahl, t, zahl, type TextSchluessel } from "./texte";
 
-type Werkzeug = "auswahl" | "hand" | "rechteck" | "kreis" | "ellipse";
+type Werkzeug = "auswahl" | "hand" | "rechteck" | "kreis" | "ellipse" | "tpocket";
 
 const WERKZEUGE: { id: Werkzeug; taste: string; icon: string }[] = [
   { id: "auswahl", taste: "V", icon: '<path d="M6 3l12 9-5 1.2 3 6-2.2 1-3-6L6 18z"/>' },
@@ -13,6 +13,7 @@ const WERKZEUGE: { id: Werkzeug; taste: string; icon: string }[] = [
   { id: "rechteck", taste: "R", icon: '<rect x="4" y="6" width="16" height="12" rx="1.5"/>' },
   { id: "kreis", taste: "K", icon: '<circle cx="12" cy="12" r="8"/>' },
   { id: "ellipse", taste: "E", icon: '<ellipse cx="12" cy="12" rx="9" ry="6"/>' },
+  { id: "tpocket", taste: "T", icon: '<path d="M3 6h18v4h-4v9H7v-9H3z"/>' },
 ];
 
 // ---------------------------------------------------------------- Zustand
@@ -300,6 +301,12 @@ function teilFelder(g: Teil): HTMLElement[] {
       zahlFeld(t("teil.hoehe"), f.hoehe, (x) => aendern(() => (f.hoehe = x))),
     );
     if (f.art === "rechteck") felder.push(zahlFeld(t("teil.radius"), f.eckenradius, (x) => aendern(() => (f.eckenradius = x))));
+    if (f.art === "tpocket") {
+      felder.push(
+        zahlFeld(t("teil.fluegelUeberstand"), f.fluegelUeberstand, (x) => aendern(() => (f.fluegelUeberstand = x))),
+        zahlFeld(t("teil.fluegelHoehe"), f.fluegelHoehe, (x) => aendern(() => (f.fluegelHoehe = x))),
+      );
+    }
   }
   felder.push(
     zahlFeld(t("teil.x"), g.x, (x) => aendern(() => (g.x = x))),
@@ -321,6 +328,21 @@ function teilFelder(g: Teil): HTMLElement[] {
       auswahlFeld<Eisen>(t("naht.eisen"), n.eisen, [["french", t("eisen.french")], ["diamond", t("eisen.diamond")], ["japan", t("eisen.japan")]], (x) => aendern((m) => ((n.eisen = x), merke(m)))),
       auswahlFeld<Ecke>(t("naht.ecke"), n.ecke, [["ein", t("ecke.ein")], ["aus", t("ecke.aus")], ["mitte", t("ecke.mitte")]], (x) => aendern((m) => ((n.ecke = x), merke(m)))),
     );
+    if (f.art === "tpocket") {
+      felder.push(el("p", { class: "feld-titel" }, t("naht.kanten")));
+      const kante = (text: TextSchluessel, wert: boolean, setzen: (x: boolean) => void) => {
+        const id = `feld-${++feldNummer}`;
+        const k = el("input", { id, type: "checkbox" });
+        k.checked = wert;
+        k.addEventListener("change", () => aendern(() => setzen(k.checked)));
+        return el("div", { class: "feld feld-zeile" }, k, el("label", { for: id }, t(text)));
+      };
+      felder.push(
+        kante("naht.fluegel", f.nahtFluegel, (x) => (f.nahtFluegel = x)),
+        kante("naht.steg", f.nahtSteg, (x) => (f.nahtSteg = x)),
+        kante("naht.oeffnung", f.nahtOeffnung, (x) => (f.nahtOeffnung = x)),
+      );
+    }
     const geo = pfadeSofort(g)?.geometrie;
     if (geo?.stichfehler) {
       felder.push(el("p", { class: "meldung fehler", role: "alert" }, fehlertext(geo.stichfehler)));
@@ -446,6 +468,10 @@ canvas.addEventListener("pointerup", () => {
       teilAnlegen({ art: "kreis", durchmesser: gross ? v.breite : 60 }, x, y);
     } else if (werkzeug === "ellipse") {
       teilAnlegen({ art: "ellipse", breite: gross ? v.breite : 80, hoehe: gross ? v.hoehe : 50 }, x, y);
+    } else if (werkzeug === "tpocket") {
+      // Unter 20 × 15 mm bleibt kein sinnvoller Steg: dann die Startwerte.
+      const passt = v && v.breite >= 20 && v.hoehe >= 15;
+      teilAnlegen(passt ? neueTPocket(v.breite, v.hoehe) : neueTPocket(), x, y);
     }
   }
   neuZeichnen();
@@ -463,7 +489,7 @@ canvas.addEventListener(
 
 // ---------------------------------------------------------------- Tastatur
 
-const TASTEN: Record<string, Werkzeug> = { v: "auswahl", h: "hand", r: "rechteck", k: "kreis", e: "ellipse" };
+const TASTEN: Record<string, Werkzeug> = { v: "auswahl", h: "hand", r: "rechteck", k: "kreis", e: "ellipse", t: "tpocket" };
 
 window.addEventListener("keydown", (e) => {
   const imFeld = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement;

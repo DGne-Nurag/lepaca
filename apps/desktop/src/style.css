@@ -365,3 +365,9 @@ button.klein {
 .flaeche:focus-visible {
   outline-offset: -3px;
 }
+
+.feld-titel {
+  margin: 6px 0 6px;
+  font-size: 13px;
+  color: var(--text-leise);
+}

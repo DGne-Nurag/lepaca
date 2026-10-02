@@ -36,9 +36,66 @@ pub enum Form {
         breite: Mm,
         hoehe: Mm,
     },
+    /// Kartenfach in T-Form: oben der volle Querbalken mit den Flügeln,
+    /// die in der Randnaht mitlaufen; darunter der schmalere Steg, der
+    /// beim Staffeln unter dem nächsten Fach verschwindet.
+    TPocket {
+        /// Breite über die Flügel gemessen.
+        breite: Mm,
+        /// Höhe von der Öffnung bis zur Unterkante des Stegs.
+        hoehe: Mm,
+        /// Wie weit jeder Flügel seitlich über den Steg hinausragt.
+        fluegel_ueberstand: Mm,
+        /// Höhe der Flügel ab der Öffnung, meist gleich dem Versatz
+        /// zum nächsten Fach.
+        fluegel_hoehe: Mm,
+    },
     /// Freie, geschlossene Form aus Linien und Kurven.
     Pfad(Pfad),
 }
+
+/// Nahtwahl für eine T-Pocket, in Begriffen des Teils statt Kantennummern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TPocketNaehte {
+    /// Seitenkanten der Flügel; sie laufen in der Randnaht mit.
+    pub fluegel: bool,
+    /// Unterkante des Stegs, quer genäht.
+    pub steg_unten: bool,
+    /// Oberkante (Öffnung). Normalerweise nur gekantet, nicht genäht.
+    pub oeffnung: bool,
+}
+
+impl Default for TPocketNaehte {
+    fn default() -> Self {
+        TPocketNaehte {
+            fluegel: true,
+            steg_unten: true,
+            oeffnung: false,
+        }
+    }
+}
+
+impl TPocketNaehte {
+    /// Kantenwahl passend zur Kontur von [`Form::TPocket`]: Kante `i`
+    /// läuft von Punkt `i` zu Punkt `i + 1`.
+    pub fn kanten(self) -> Vec<bool> {
+        // 0 Öffnung, 1 Flügel rechts, 2 Flügel rechts unten, 3 Steg rechts,
+        // 4 Steg unten, 5 Steg links, 6 Flügel links unten, 7 Flügel links.
+        vec![
+            self.oeffnung,
+            self.fluegel,
+            false,
+            false,
+            self.steg_unten,
+            false,
+            false,
+            self.fluegel,
+        ]
+    }
+}
+
+/// Mindestbreite des Stegs, damit noch eine Karte hält und genäht werden kann.
+pub const MIN_STEG_MM: f64 = 10.0;
 
 /// Ein geschlossener Pfad. Nach dem letzten Element wird automatisch
 /// zum Start zurückgezogen.
@@ -65,6 +122,9 @@ pub enum FormFehler {
     /// Breite, Höhe oder Durchmesser liegt außerhalb von
     /// [`MIN_GROESSE_MM`]..=[`MAX_GROESSE_MM`].
     GroesseAusserhalb,
+    /// Die Flügel einer T-Pocket sind so breit, dass vom Steg weniger als
+    /// [`MIN_STEG_MM`] bleibt, oder so hoch wie das ganze Fach.
+    FluegelZuGross,
     /// Der Eckenradius ist größer als die halbe kürzere Seite.
     EckenradiusZuGross,
     Kontur(KonturFehler),
@@ -90,6 +150,17 @@ impl Form {
                 ellipse(d, d)
             }
             Form::Ellipse { breite, hoehe } => ellipse(breite.wert(), hoehe.wert()),
+            Form::TPocket {
+                breite,
+                hoehe,
+                fluegel_ueberstand,
+                fluegel_hoehe,
+            } => t_pocket(
+                breite.wert(),
+                hoehe.wert(),
+                fluegel_ueberstand.wert(),
+                fluegel_hoehe.wert(),
+            ),
             Form::Pfad(p) => pfad(p),
         }
     }
@@ -145,6 +216,26 @@ fn rechteck(b: f64, h: f64, r: f64) -> Result<Kontur, FormFehler> {
     }
     let ecke = vec![false; punkte.len()];
     Ok(Kontur::neu(punkte, ecke)?)
+}
+
+fn t_pocket(b: f64, h: f64, u: f64, fh: f64) -> Result<Kontur, FormFehler> {
+    pruefe_groesse(b)?;
+    pruefe_groesse(h)?;
+    if u <= 0.0 || b - 2.0 * u < MIN_STEG_MM || fh <= 0.0 || fh >= h {
+        return Err(FormFehler::FluegelZuGross);
+    }
+    // Im Uhrzeigersinn auf dem Bildschirm, beginnend oben links.
+    let p = vec![
+        Punkt::neu(0.0, 0.0),
+        Punkt::neu(b, 0.0),
+        Punkt::neu(b, fh),
+        Punkt::neu(b - u, fh),
+        Punkt::neu(b - u, h),
+        Punkt::neu(u, h),
+        Punkt::neu(u, fh),
+        Punkt::neu(0.0, fh),
+    ];
+    Ok(Kontur::neu(p, vec![true; 8])?)
 }
 
 fn ellipse(b: f64, h: f64) -> Result<Kontur, FormFehler> {
@@ -344,5 +435,43 @@ mod tests {
         // sind tangential und zählen nicht.
         assert_eq!(knicke, 2);
         assert!(k.ist_ecke(0));
+    }
+
+    fn t_pocket(b: f64, h: f64, u: f64, fh: f64) -> Result<Kontur, FormFehler> {
+        Form::TPocket {
+            breite: mm(b),
+            hoehe: mm(h),
+            fluegel_ueberstand: mm(u),
+            fluegel_hoehe: mm(fh),
+        }
+        .kontur()
+    }
+
+    #[test]
+    fn eine_t_pocket_hat_acht_ecken_und_einen_schmaleren_steg() {
+        // Springfield-Maß: 101,6 × 44,5 mm, Flügel 12,7 mm, 12 mm hoch.
+        let k = t_pocket(101.6, 44.5, 12.7, 12.0).unwrap();
+        assert_eq!(k.len(), 8);
+        assert!(k.ecken().iter().all(|&e| e));
+        let (von, bis) = k.grenzen();
+        assert!((bis.x - von.x - 101.6).abs() < 1e-9);
+        assert!((bis.y - von.y - 44.5).abs() < 1e-9);
+        // Fläche: Querbalken plus Steg darunter.
+        let soll = 101.6 * 12.0 + (101.6 - 2.0 * 12.7) * (44.5 - 12.0);
+        assert!((k.flaeche_mit_vorzeichen().abs() - soll).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zu_breite_oder_zu_hohe_fluegel_werden_abgewiesen() {
+        // Steg bliebe nur 6 mm breit.
+        assert_eq!(
+            t_pocket(80.0, 40.0, 37.0, 10.0),
+            Err(FormFehler::FluegelZuGross)
+        );
+        // Flügel so hoch wie das ganze Fach: das wäre ein Rechteck.
+        assert_eq!(
+            t_pocket(80.0, 40.0, 10.0, 40.0),
+            Err(FormFehler::FluegelZuGross)
+        );
     }
 }

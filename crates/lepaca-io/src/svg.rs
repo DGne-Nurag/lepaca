@@ -36,11 +36,16 @@ pub fn teil(kontur: &Kontur, stiche: &Stichreihe, loch: &Lochform) -> String {
         r##"<path d="{}" fill="none" stroke="#000" stroke-width="0.25"/>"##,
         pfad(kontur.punkte(), versatz)
     );
-    let _ = writeln!(
-        s,
-        r##"<path d="{}" fill="none" stroke="#888" stroke-width="0.1" stroke-dasharray="1 1"/>"##,
-        pfad(stiche.linie.punkte(), versatz)
-    );
+    for linie in &stiche.linien {
+        let mut d = linienzug(&linie.punkte, versatz);
+        if linie.geschlossen {
+            d.push_str(" Z");
+        }
+        let _ = writeln!(
+            s,
+            r##"<path d="{d}" fill="none" stroke="#888" stroke-width="0.1" stroke-dasharray="1 1"/>"##
+        );
+    }
     let _ = writeln!(s, r##"<g fill="#000">"##);
     for l in &stiche.loecher {
         let u = loch.umriss(l);
@@ -64,6 +69,13 @@ pub fn teil(kontur: &Kontur, stiche: &Stichreihe, loch: &Lochform) -> String {
 }
 
 fn pfad(punkte: &[Punkt], versatz: Punkt) -> String {
+    let mut d = linienzug(punkte, versatz);
+    d.push_str(" Z");
+    d
+}
+
+/// Linienzug ohne ihn zu schließen.
+fn linienzug(punkte: &[Punkt], versatz: Punkt) -> String {
     let mut d = String::new();
     for (i, p) in punkte.iter().enumerate() {
         let p = p.plus(versatz);
@@ -75,8 +87,7 @@ fn pfad(punkte: &[Punkt], versatz: Punkt) -> String {
             zahl(p.y)
         );
     }
-    d.push('Z');
-    d
+    d.trim_end().to_string()
 }
 
 /// Zahl mit drei Nachkommastellen und Punkt als Trenner, unabhängig von der

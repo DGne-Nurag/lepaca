@@ -9,7 +9,7 @@ type P = [number, number];
 
 export interface Geometrie {
   kontur: P[];
-  linie: P[];
+  linien: { punkte: P[]; geschlossen: boolean }[];
   loecher: [P, P, P, P][];
   ecklocher: number;
   abstaende: number[];
@@ -36,10 +36,10 @@ function teilDaten(t: Teil, x: number, y: number) {
   return { form: t.form, x, y, stiche: t.naht };
 }
 
-function pfad(punkte: P[]): Path2D {
+function pfad(punkte: P[], geschlossen = true): Path2D {
   const p = new Path2D();
   punkte.forEach(([x, y], i) => (i === 0 ? p.moveTo(x, y) : p.lineTo(x, y)));
-  p.closePath();
+  if (geschlossen) p.closePath();
   return p;
 }
 
@@ -63,6 +63,8 @@ export async function pfadeFuer(t: Teil): Promise<Pfade> {
   const offen = laufend.get(s);
   if (offen) return offen;
   const p = invoke<Geometrie>("teil_geometrie", { teil: teilDaten(t, 0, 0) }).then((g) => {
+    const linie = new Path2D();
+    for (const l of g.linien) linie.addPath(pfad(l.punkte, l.geschlossen));
     const loecher = new Path2D();
     for (const l of g.loecher) loecher.addPath(pfad(l));
     let min: P = [Infinity, Infinity];
@@ -71,7 +73,7 @@ export async function pfadeFuer(t: Teil): Promise<Pfade> {
       min = [Math.min(min[0], x), Math.min(min[1], y)];
       max = [Math.max(max[0], x), Math.max(max[1], y)];
     }
-    const fertig: Pfade = { geometrie: g, kontur: pfad(g.kontur), linie: pfad(g.linie), loecher, min, max };
+    const fertig: Pfade = { geometrie: g, kontur: pfad(g.kontur), linie, loecher, min, max };
     if (cache.size > 2000) cache.clear();
     cache.set(s, fertig);
     laufend.delete(s);
