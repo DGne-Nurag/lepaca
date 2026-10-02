@@ -15,19 +15,39 @@ use lepaca_core::stichlinie::Stichreihe;
 
 const PT_PRO_MM: f64 = 72.0 / 25.4;
 
-/// Erzeugt das komplette PDF: ein Blatt pro Kachel und eine Prüfseite.
+/// Ein Teil, wie es gedruckt wird: Schnittkante und optional Stichreihe
+/// mit Lochform. Koordinaten in Millimetern im gemeinsamen Muster.
+#[derive(Debug, Clone, Copy)]
+pub struct Druckteil<'a> {
+    pub kontur: &'a Kontur,
+    pub stiche: Option<(&'a Stichreihe, &'a Lochform)>,
+}
+
+/// Erzeugt das komplette PDF für ein einzelnes Teil.
 pub fn teil_gekachelt(
     kontur: &Kontur,
     stiche: &Stichreihe,
     loch: &Lochform,
     plan: &Kachelplan,
 ) -> Vec<u8> {
+    muster_gekachelt(
+        &[Druckteil {
+            kontur,
+            stiche: Some((stiche, loch)),
+        }],
+        plan,
+    )
+}
+
+/// Erzeugt das komplette PDF für ein Muster aus mehreren Teilen: ein Blatt
+/// pro Kachel und eine Prüfseite.
+pub fn muster_gekachelt(teile: &[Druckteil<'_>], plan: &Kachelplan) -> Vec<u8> {
     let gesamt = plan.kacheln.len() + 1;
     let mut seiten: Vec<String> = plan
         .kacheln
         .iter()
         .enumerate()
-        .map(|(i, k)| kachelseite(kontur, stiche, loch, plan, k, i + 1, gesamt))
+        .map(|(i, k)| kachelseite(teile, plan, k, i + 1, gesamt))
         .collect();
     seiten.push(pruefseite(plan, gesamt));
     dokument(&seiten, plan.blatt_breite, plan.blatt_hoehe)
@@ -36,9 +56,7 @@ pub fn teil_gekachelt(
 /// Inhalt eines Blatts. Gezeichnet wird in Millimetern mit y nach unten;
 /// die erste Transformation rechnet das in PDF-Punkte um.
 fn kachelseite(
-    kontur: &Kontur,
-    stiche: &Stichreihe,
-    loch: &Lochform,
+    teile: &[Druckteil<'_>],
     plan: &Kachelplan,
     k: &Kachel,
     nummer: usize,
@@ -62,15 +80,36 @@ fn kachelseite(
     // Muster, auf die Nutzfläche beschnitten.
     let _ = writeln!(s, "q {} {} {} {} re W n", z(r), z(r), z(nb), z(nh));
     let _ = writeln!(s, "1 0 0 1 {} {} cm", z(r - k.von.x), z(r - k.von.y));
-    let _ = writeln!(s, "0 G 0.25 w");
-    pfad(&mut s, kontur.punkte());
-    let _ = writeln!(s, "s");
-    let _ = writeln!(s, "0.5 G 0.1 w [1 1] 0 d");
-    pfad(&mut s, stiche.linie.punkte());
-    let _ = writeln!(s, "s [] 0 d 0 g");
-    for l in &stiche.loecher {
-        pfad(&mut s, &loch.umriss(l));
-        let _ = writeln!(s, "f");
+    // Nur zeichnen, was auf diesem Blatt zu sehen ist; sonst trüge jedes
+    // Blatt das ganze Muster und große Muster würden riesige Dateien.
+    let sichtbar = |von: Punkt, bis: Punkt| {
+        bis.x >= k.von.x && von.x <= k.von.x + nb && bis.y >= k.von.y && von.y <= k.von.y + nh
+    };
+    for teil in teile {
+        let (von, bis) = teil.kontur.grenzen();
+        if !sichtbar(von, bis) {
+            continue;
+        }
+        let _ = writeln!(s, "0 G 0.25 w");
+        pfad(&mut s, teil.kontur.punkte());
+        let _ = writeln!(s, "s");
+        if let Some((stiche, loch)) = teil.stiche {
+            let _ = writeln!(s, "0.5 G 0.1 w [1 1] 0 d");
+            pfad(&mut s, stiche.linie.punkte());
+            let _ = writeln!(s, "s [] 0 d 0 g");
+            let halb = loch.laenge.max(loch.breite);
+            for l in &stiche.loecher {
+                let m = l.mitte;
+                if !sichtbar(
+                    Punkt::neu(m.x - halb, m.y - halb),
+                    Punkt::neu(m.x + halb, m.y + halb),
+                ) {
+                    continue;
+                }
+                pfad(&mut s, &loch.umriss(l));
+                let _ = writeln!(s, "f");
+            }
+        }
     }
     let _ = writeln!(s, "Q");
 
@@ -395,6 +434,22 @@ mod tests {
             anzahl += 1;
         }
         assert!(anzahl > 3);
+    }
+
+    #[test]
+    fn jedes_blatt_traegt_nur_die_stichloecher_die_darauf_liegen() {
+        let (pdf, plan) = beispiel(400.0, 300.0);
+        let t = als_text(&pdf);
+        // Jedes Loch ist ein gefülltes Viereck, das mit „f“ endet. Über alle
+        // Blätter zusammen kommt jedes Loch nur einmal vor, außer auf den
+        // Klebekanten, wo sich die Blätter überlappen.
+        let loecher_im_pdf = t.lines().filter(|z| *z == "f").count();
+        let loecher_im_teil = (2.0 * (400.0 + 300.0) / 3.85) as usize; // grob
+        assert!(plan.kacheln.len() >= 4);
+        assert!(
+            loecher_im_pdf < loecher_im_teil * 2,
+            "{loecher_im_pdf} Löcher im PDF bei etwa {loecher_im_teil} im Teil"
+        );
     }
 
     #[test]

@@ -129,6 +129,15 @@ impl Kontur {
         Ok(k)
     }
 
+    /// Dieselbe Kontur, um (dx, dy) verschoben.
+    pub fn verschoben(&self, dx: f64, dy: f64) -> Kontur {
+        let d = Punkt::neu(dx, dy);
+        Kontur {
+            punkte: self.punkte.iter().map(|p| p.plus(d)).collect(),
+            ecke: self.ecke.clone(),
+        }
+    }
+
     pub fn punkte(&self) -> &[Punkt] {
         &self.punkte
     }
@@ -230,6 +239,15 @@ mod tests {
         assert!((q.umfang() - 40.0).abs() < TOLERANZ_MM);
         assert!((q.flaeche_mit_vorzeichen().abs() - 100.0).abs() < TOLERANZ_MM);
         assert!(!q.schneidet_sich_selbst());
+    }
+
+    #[test]
+    fn verschieben_aendert_weder_form_noch_ecken() {
+        let q = quadrat();
+        let v = q.verschoben(25.0, -5.0);
+        assert!((v.umfang() - q.umfang()).abs() < TOLERANZ_MM);
+        assert_eq!(v.ecken(), q.ecken());
+        assert_eq!(v.grenzen().0, Punkt::neu(25.0, -5.0));
     }
 
     #[test]
