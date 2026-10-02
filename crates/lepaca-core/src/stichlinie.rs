@@ -26,6 +26,24 @@ pub struct Einstellung {
     pub kantenabstand: Mm,
     /// Gewünschter Abstand von Loch zu Loch.
     pub lochabstand: Mm,
+    /// Wie das Loch auf einer Ecke ausgerichtet wird.
+    pub ecke: Eckausrichtung,
+}
+
+/// Ausrichtung des Lochs auf einer Ecke.
+///
+/// Gängige Regel: Alle Löcher einer Seite haben denselben Schrägwinkel zur
+/// Naht. Das Eckloch übernimmt deshalb standardmäßig die Ausrichtung der
+/// Kante, die in die Ecke hineinläuft, und passt so zu seinen Nachbarn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Eckausrichtung {
+    /// Wie die Kante, die in die Ecke hineinläuft.
+    #[default]
+    Einlaufend,
+    /// Wie die Kante, die aus der Ecke hinausläuft.
+    Auslaufend,
+    /// Winkelhalbierende zwischen beiden Kanten.
+    Mitte,
 }
 
 /// Ein Stichloch: Mittelpunkt und Richtung der Naht an dieser Stelle.
@@ -111,7 +129,7 @@ pub fn stichreihe(kontur: &Kontur, e: Einstellung) -> Result<Stichreihe, StichFe
         let auf_ecke = linie.ist_ecke(von);
         loecher.push(Stichloch {
             mitte: linie.punkt(von),
-            richtung: richtung_an_punkt(&linie, von),
+            richtung: richtung_an_punkt(&linie, von, e.ecke),
             auf_ecke,
         });
         let mut gelaufen = 0.0;
@@ -141,14 +159,22 @@ pub fn stichreihe(kontur: &Kontur, e: Einstellung) -> Result<Stichreihe, StichFe
     })
 }
 
-/// Nahtrichtung an einem Punkt der Linie: Mittel aus ein- und auslaufender
-/// Kante (auf einer Ecke also die Winkelhalbierende der Laufrichtung).
-fn richtung_an_punkt(linie: &Kontur, i: usize) -> Punkt {
+/// Nahtrichtung an einem Punkt der Linie. Auf einer Ecke entscheidet die
+/// [`Eckausrichtung`]; auf glatten Stellen ist es das Mittel aus ein- und
+/// auslaufender Kante.
+fn richtung_an_punkt(linie: &Kontur, i: usize, ecke: Eckausrichtung) -> Punkt {
     let n = linie.len();
     let p = linie.punkt(i);
     let ein = p.minus(linie.punkt(i + n - 1)).normiert();
     let aus = linie.punkt(i + 1).minus(p).normiert();
+    let ausrichtung = if linie.ist_ecke(i) {
+        ecke
+    } else {
+        Eckausrichtung::Mitte
+    };
     match (ein, aus) {
+        (Some(a), Some(_)) if ausrichtung == Eckausrichtung::Einlaufend => a,
+        (Some(_), Some(b)) if ausrichtung == Eckausrichtung::Auslaufend => b,
         (Some(a), Some(b)) => a.plus(b).normiert().unwrap_or(b),
         (_, Some(b)) => b,
         (Some(a), _) => a,
@@ -170,6 +196,7 @@ mod tests {
         Einstellung {
             kantenabstand: mm(kante),
             lochabstand: mm(loch),
+            ecke: Eckausrichtung::default(),
         }
     }
 
@@ -265,6 +292,30 @@ mod tests {
             .find(|l| !l.auf_ecke && (l.mitte.y - 3.0).abs() < 1e-6);
         let richtung = oben.unwrap().richtung;
         assert!(richtung.x.abs() > 0.999 && richtung.y.abs() < 1e-6);
+    }
+
+    #[test]
+    fn das_eckloch_hat_standardmaessig_die_richtung_der_einlaufenden_kante() {
+        let k = rechteck(80.0, 50.0, 0.0);
+        let ecklochrichtung = |ecke| {
+            let e = Einstellung {
+                ecke,
+                ..einstellung(3.0, 4.0)
+            };
+            let r = stichreihe(&k, e).unwrap();
+            // Erstes Loch ist die Ecke oben links (3, 3).
+            assert!(r.loecher[0].auf_ecke);
+            assert!(r.loecher[0].mitte.abstand(Punkt::neu(3.0, 3.0)) < TOLERANZ_MM);
+            r.loecher[0].richtung
+        };
+        let ein = ecklochrichtung(Eckausrichtung::Einlaufend);
+        let aus = ecklochrichtung(Eckausrichtung::Auslaufend);
+        let mitte = ecklochrichtung(Eckausrichtung::Mitte);
+        // Die Naht kommt von unten (linke Seite) und läuft nach rechts weiter.
+        assert!(ein.abstand(Punkt::neu(0.0, -1.0)) < 1e-9, "{ein:?}");
+        assert!(aus.abstand(Punkt::neu(1.0, 0.0)) < 1e-9, "{aus:?}");
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        assert!(mitte.abstand(Punkt::neu(h, -h)) < 1e-9, "{mitte:?}");
     }
 
     #[test]

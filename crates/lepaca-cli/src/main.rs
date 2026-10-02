@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use lepaca_core::eisen::Eisenart;
 use lepaca_core::form::Form;
 use lepaca_core::mass::Mm;
-use lepaca_core::stichlinie::{Einstellung, stichreihe};
+use lepaca_core::stichlinie::{Eckausrichtung, Einstellung, stichreihe};
 
 const HILFE: &str = "\
 lepaca – Leather Pattern CAD
@@ -27,6 +27,8 @@ Optionen (alle Maße in Millimetern):
   --eisen french|diamond|japan    Eisenart (Standard: diamond)
   --lochabstand <mm>              Zinkenabstand (Standard: 3.85)
   --kantenabstand <mm>            Abstand der Naht zur Kante (Standard: 3)
+  --ecke ein|aus|mitte            Ausrichtung des Ecklochs (Standard: ein,
+                                  wie die einlaufende Kante)
   --ausgabe <datei.svg>           Zieldatei
   --ueberschreiben                Vorhandene Datei ersetzen
   --version                       Version anzeigen
@@ -45,6 +47,7 @@ struct Optionen {
     eisen: Option<String>,
     lochabstand: Option<f64>,
     kantenabstand: Option<f64>,
+    ecke: Option<String>,
     ausgabe: Option<PathBuf>,
     ueberschreiben: bool,
 }
@@ -101,6 +104,7 @@ fn lies_optionen(args: &[String]) -> Result<Optionen, String> {
             "--eisen" => o.eisen = it.next().cloned(),
             "--lochabstand" => o.lochabstand = Some(zahl(a, it.next())?),
             "--kantenabstand" => o.kantenabstand = Some(zahl(a, it.next())?),
+            "--ecke" => o.ecke = it.next().cloned(),
             "--ausgabe" => o.ausgabe = it.next().map(PathBuf::from),
             "--ueberschreiben" => o.ueberschreiben = true,
             _ => return Err(format!("Unbekannte Option „{a}“. Hilfe: lepaca --hilfe")),
@@ -144,9 +148,20 @@ fn svg(o: Optionen) -> Result<String, String> {
             ));
         }
     };
+    let ecke = match o.ecke.as_deref().unwrap_or("ein") {
+        "ein" => Eckausrichtung::Einlaufend,
+        "aus" => Eckausrichtung::Auslaufend,
+        "mitte" => Eckausrichtung::Mitte,
+        e => {
+            return Err(format!(
+                "Unbekannte Eckausrichtung „{e}“. Möglich: ein, aus, mitte."
+            ));
+        }
+    };
     let einstellung = Einstellung {
         kantenabstand: mm("kantenabstand", Some(o.kantenabstand.unwrap_or(3.0)))?,
         lochabstand: mm("lochabstand", Some(o.lochabstand.unwrap_or(3.85)))?,
+        ecke,
     };
     let ausgabe = o.ausgabe.ok_or("Bitte --ausgabe <datei.svg> angeben.")?;
 

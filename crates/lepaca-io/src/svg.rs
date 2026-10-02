@@ -114,6 +114,7 @@ mod tests {
         let e = Einstellung {
             kantenabstand: mm(3.0),
             lochabstand: mm(4.0),
+            ecke: Default::default(),
         };
         let r = stichreihe(&k, e).unwrap();
         teil(&k, &r, &Eisenart::Diamant.lochform(e.lochabstand))
