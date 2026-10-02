@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 lepaca-core = { path = "../lepaca-core" }
+lepaca-io = { path = "../lepaca-io" }
 
 [lints]
 workspace = true
