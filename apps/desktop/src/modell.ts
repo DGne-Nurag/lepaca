@@ -7,7 +7,17 @@ export type Ecke = "ein" | "aus" | "mitte";
 export type Form =
   | { art: "rechteck"; breite: number; hoehe: number; eckenradius: number }
   | { art: "kreis"; durchmesser: number }
-  | { art: "ellipse"; breite: number; hoehe: number };
+  | { art: "ellipse"; breite: number; hoehe: number }
+  | {
+      art: "tpocket";
+      breite: number;
+      hoehe: number;
+      fluegelUeberstand: number;
+      fluegelHoehe: number;
+      nahtFluegel: boolean;
+      nahtSteg: boolean;
+      nahtOeffnung: boolean;
+    };
 
 export interface Naht {
   kantenabstand: number;
@@ -44,6 +54,20 @@ export function neuesMuster(): Muster {
     teile: [],
     druck: { papier: "a4", rand: 10, klebekante: 10 },
     standardNaht: { kantenabstand: 3, lochabstand: 3.85, eisen: "diamond", ecke: "ein" },
+  };
+}
+
+/** Startwerte einer T-Pocket (Springfield Leather: 4" × 1¾", Flügel ½"). */
+export function neueTPocket(breite = 101.6, hoehe = 44.5): Form {
+  return {
+    art: "tpocket",
+    breite,
+    hoehe,
+    fluegelUeberstand: Math.min(12.7, Math.max(1, (breite - 10) / 2 - 0.1)),
+    fluegelHoehe: Math.min(12, hoehe / 3),
+    nahtFluegel: true,
+    nahtSteg: true,
+    nahtOeffnung: false,
   };
 }
 

@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use lepaca_core::eisen::Eisenart;
-use lepaca_core::form::Form;
+use lepaca_core::form::{Form, TPocketNaehte};
 use lepaca_core::kachelung::{Einstellung as KachelEinstellung, Papier, kacheln};
 use lepaca_core::mass::Mm;
-use lepaca_core::stichlinie::{Eckausrichtung, Einstellung, stichreihe};
+use lepaca_core::stichlinie::{Eckausrichtung, Einstellung, stichreihe, stichreihe_an_kanten};
 
 const HILFE: &str = "\
 lepaca – Leather Pattern CAD
@@ -21,11 +21,14 @@ Aufruf:
   lepaca pdf [Optionen]   Teil als PDF, auf Blätter gekachelt, mit Prüfseite
 
 Optionen (alle Maße in Millimetern):
-  --form rechteck|kreis|ellipse   Grundform (Standard: rechteck)
+  --form rechteck|kreis|ellipse|tpocket
+                                  Grundform (Standard: rechteck)
   --breite <mm>                   Breite (Rechteck, Ellipse)
   --hoehe <mm>                    Höhe (Rechteck, Ellipse)
   --radius <mm>                   Eckenradius (Rechteck, Standard: 0)
   --durchmesser <mm>              Durchmesser (Kreis)
+  --fluegel <mm>                  Flügelüberstand je Seite (T-Pocket, Standard: 12.7)
+  --fluegelhoehe <mm>             Flügelhöhe ab Öffnung (T-Pocket, Standard: 12)
   --eisen french|diamond|japan    Eisenart (Standard: diamond)
   --lochabstand <mm>              Zinkenabstand (Standard: 3.85)
   --kantenabstand <mm>            Abstand der Naht zur Kante (Standard: 3)
@@ -49,6 +52,8 @@ struct Optionen {
     hoehe: Option<f64>,
     radius: Option<f64>,
     durchmesser: Option<f64>,
+    fluegel: Option<f64>,
+    fluegelhoehe: Option<f64>,
     eisen: Option<String>,
     lochabstand: Option<f64>,
     kantenabstand: Option<f64>,
@@ -110,6 +115,8 @@ fn lies_optionen(args: &[String]) -> Result<Optionen, String> {
             "--hoehe" => o.hoehe = Some(zahl(a, it.next())?),
             "--radius" => o.radius = Some(zahl(a, it.next())?),
             "--durchmesser" => o.durchmesser = Some(zahl(a, it.next())?),
+            "--fluegel" => o.fluegel = Some(zahl(a, it.next())?),
+            "--fluegelhoehe" => o.fluegelhoehe = Some(zahl(a, it.next())?),
             "--eisen" => o.eisen = it.next().cloned(),
             "--lochabstand" => o.lochabstand = Some(zahl(a, it.next())?),
             "--kantenabstand" => o.kantenabstand = Some(zahl(a, it.next())?),
@@ -150,9 +157,15 @@ fn erzeugen(o: Optionen, format: Format) -> Result<String, String> {
             breite: mm("breite", o.breite)?,
             hoehe: mm("hoehe", o.hoehe)?,
         },
+        "tpocket" => Form::TPocket {
+            breite: mm("breite", o.breite)?,
+            hoehe: mm("hoehe", o.hoehe)?,
+            fluegel_ueberstand: mm("fluegel", Some(o.fluegel.unwrap_or(12.7)))?,
+            fluegel_hoehe: mm("fluegelhoehe", Some(o.fluegelhoehe.unwrap_or(12.0)))?,
+        },
         f => {
             return Err(format!(
-                "Unbekannte Form „{f}“. Möglich: rechteck, kreis, ellipse."
+                "Unbekannte Form „{f}“. Möglich: rechteck, kreis, ellipse, tpocket."
             ));
         }
     };
@@ -186,8 +199,13 @@ fn erzeugen(o: Optionen, format: Format) -> Result<String, String> {
     let kontur = form
         .kontur()
         .map_err(|e| format!("Die Form ist ungültig: {e:?}"))?;
-    let reihe =
-        stichreihe(&kontur, einstellung).map_err(|e| format!("Keine Stichreihe möglich: {e:?}"))?;
+    // T-Pockets werden nur an Flügeln und Steg genäht, nicht an der Öffnung.
+    let reihe = if matches!(form, Form::TPocket { .. }) {
+        stichreihe_an_kanten(&kontur, &TPocketNaehte::default().kanten(), einstellung)
+    } else {
+        stichreihe(&kontur, einstellung)
+    }
+    .map_err(|e| format!("Keine Stichreihe möglich: {e:?}"))?;
     let lochform = eisen.lochform(einstellung.lochabstand);
     let mut blaetter = String::new();
     let inhalt = match format {

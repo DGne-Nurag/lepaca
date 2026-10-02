@@ -5,7 +5,7 @@
 //! dieser Teil, die Oberfläche bekommt keinen Dateizugriff (ADR 0002).
 
 use lepaca_core::eisen::Eisenart;
-use lepaca_core::form::{Form, FormFehler};
+use lepaca_core::form::{Form, FormFehler, TPocketNaehte};
 use lepaca_core::geometrie::{Kontur, KonturFehler};
 use lepaca_core::kachelung::{self, KachelFehler, Papier};
 use lepaca_core::mass::Mm;
@@ -33,6 +33,17 @@ pub enum FormDaten {
         breite: f64,
         hoehe: f64,
     },
+    /// Kartenfach in T-Form. Die Naht läuft nur an den gewählten Kanten.
+    #[serde(rename_all = "camelCase")]
+    Tpocket {
+        breite: f64,
+        hoehe: f64,
+        fluegel_ueberstand: f64,
+        fluegel_hoehe: f64,
+        naht_fluegel: bool,
+        naht_steg: bool,
+        naht_oeffnung: bool,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,7 +70,7 @@ pub struct TeilDaten {
 #[serde(rename_all = "camelCase")]
 pub struct Geometrie {
     pub kontur: Vec<[f64; 2]>,
-    pub linie: Vec<[f64; 2]>,
+    pub linien: Vec<Linie>,
     pub loecher: Vec<[[f64; 2]; 4]>,
     pub ecklocher: usize,
     /// Tatsächliche Lochabstände je Abschnitt (mm).
@@ -67,6 +78,14 @@ pub struct Geometrie {
     /// Fehlercode, falls die Stichreihe nicht möglich ist; die Oberfläche
     /// übersetzt ihn in einen verständlichen Text.
     pub stichfehler: Option<String>,
+}
+
+/// Ein Stück Stichlinie zum Zeichnen.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Linie {
+    pub punkte: Vec<[f64; 2]>,
+    pub geschlossen: bool,
 }
 
 fn mm(x: f64, code: &str) -> Result<Mm, String> {
@@ -77,6 +96,7 @@ fn fehlercode_form(f: FormFehler) -> String {
     match f {
         FormFehler::GroesseAusserhalb => "form.groesse".into(),
         FormFehler::EckenradiusZuGross => "form.eckenradius".into(),
+        FormFehler::FluegelZuGross => "form.fluegel".into(),
         FormFehler::Kontur(KonturFehler::ZuVielePunkte) => "form.zuVielePunkte".into(),
         FormFehler::Kontur(_) => "form.ungueltig".into(),
     }
@@ -87,6 +107,7 @@ fn fehlercode_stich(f: StichFehler) -> String {
         StichFehler::LochabstandAusserhalb => "stich.lochabstand".into(),
         StichFehler::KantenabstandAusserhalb => "stich.kantenabstand".into(),
         StichFehler::ZuVieleLoecher => "stich.zuVieleLoecher".into(),
+        StichFehler::KantenUnpassend => "stich.kanten".into(),
         StichFehler::Versatz(VersatzFehler::AbstandZuGross) => "stich.abstandZuGross".into(),
         StichFehler::Versatz(VersatzFehler::Spitze) => "stich.spitze".into(),
     }
@@ -110,11 +131,13 @@ fn eckausrichtung(name: &str) -> Result<Eckausrichtung, String> {
     }
 }
 
-/// Kontur des Teils an seiner Position im Muster.
-fn kontur(teil: &TeilDaten) -> Result<Kontur, String> {
+/// Kontur des Teils an seiner Position im Muster, dazu die Kanten mit
+/// Naht (`None`: ringsum).
+fn kontur(teil: &TeilDaten) -> Result<(Kontur, Option<Vec<bool>>), String> {
     if !(teil.x.is_finite() && teil.y.is_finite()) || teil.x.abs() > 1e5 || teil.y.abs() > 1e5 {
         return Err("form.position".into());
     }
+    let mut kanten = None;
     let form = match teil.form {
         FormDaten::Rechteck {
             breite,
@@ -132,23 +155,52 @@ fn kontur(teil: &TeilDaten) -> Result<Kontur, String> {
             breite: mm(breite, "form.groesse")?,
             hoehe: mm(hoehe, "form.groesse")?,
         },
+        FormDaten::Tpocket {
+            breite,
+            hoehe,
+            fluegel_ueberstand,
+            fluegel_hoehe,
+            naht_fluegel,
+            naht_steg,
+            naht_oeffnung,
+        } => {
+            kanten = Some(
+                TPocketNaehte {
+                    fluegel: naht_fluegel,
+                    steg_unten: naht_steg,
+                    oeffnung: naht_oeffnung,
+                }
+                .kanten(),
+            );
+            Form::TPocket {
+                breite: mm(breite, "form.groesse")?,
+                hoehe: mm(hoehe, "form.groesse")?,
+                fluegel_ueberstand: mm(fluegel_ueberstand, "form.fluegel")?,
+                fluegel_hoehe: mm(fluegel_hoehe, "form.fluegel")?,
+            }
+        }
     };
-    Ok(form
+    let k = form
         .kontur()
         .map_err(fehlercode_form)?
-        .verschoben(teil.x, teil.y))
+        .verschoben(teil.x, teil.y);
+    Ok((k, kanten))
 }
 
 type Stiche = (Stichreihe, lepaca_core::eisen::Lochform);
 
-fn stiche(k: &Kontur, d: &StichDaten) -> Result<Stiche, String> {
+fn stiche(k: &Kontur, kanten: Option<&[bool]>, d: &StichDaten) -> Result<Stiche, String> {
     let e = stichlinie::Einstellung {
         kantenabstand: mm(d.kantenabstand, "stich.kantenabstand")?,
         lochabstand: mm(d.lochabstand, "stich.lochabstand")?,
         ecke: eckausrichtung(&d.ecke)?,
     };
     let eisen = eisenart(&d.eisen)?;
-    let reihe = stichlinie::stichreihe(k, e).map_err(fehlercode_stich)?;
+    let reihe = match kanten {
+        Some(kanten) => stichlinie::stichreihe_an_kanten(k, kanten, e),
+        None => stichlinie::stichreihe(k, e),
+    }
+    .map_err(fehlercode_stich)?;
     Ok((reihe, eisen.lochform(e.lochabstand)))
 }
 
@@ -158,19 +210,26 @@ fn punkte(k: &Kontur) -> Vec<[f64; 2]> {
 
 /// Berechnet Schnittkante, Stichlinie und Löcher eines Teils.
 pub fn geometrie(teil: &TeilDaten) -> Result<Geometrie, String> {
-    let k = kontur(teil)?;
+    let (k, kanten) = kontur(teil)?;
     let mut g = Geometrie {
         kontur: punkte(&k),
-        linie: Vec::new(),
+        linien: Vec::new(),
         loecher: Vec::new(),
         ecklocher: 0,
         abstaende: Vec::new(),
         stichfehler: None,
     };
     if let Some(d) = &teil.stiche {
-        match stiche(&k, d) {
+        match stiche(&k, kanten.as_deref(), d) {
             Ok((reihe, loch)) => {
-                g.linie = punkte(&reihe.linie);
+                g.linien = reihe
+                    .linien
+                    .iter()
+                    .map(|l| Linie {
+                        punkte: l.punkte.iter().map(|p| [p.x, p.y]).collect(),
+                        geschlossen: l.geschlossen,
+                    })
+                    .collect();
                 g.ecklocher = reihe.loecher.iter().filter(|l| l.auf_ecke).count();
                 g.loecher = reihe
                     .loecher
@@ -219,9 +278,9 @@ pub fn pdf(teile: &[TeilDaten], druck: &DruckDaten) -> Result<(Vec<u8>, usize), 
     let mut konturen = Vec::with_capacity(teile.len());
     let mut alle_stiche = Vec::with_capacity(teile.len());
     for t in teile {
-        let k = kontur(t)?;
+        let (k, kanten) = kontur(t)?;
         let s = match &t.stiche {
-            Some(d) => Some(stiche(&k, d)?),
+            Some(d) => Some(stiche(&k, kanten.as_deref(), d)?),
             None => None,
         };
         konturen.push(k);
@@ -368,6 +427,20 @@ mod tests {
         assert!(serde_json::from_str::<TeilDaten>(json).is_err());
         let gut = r#"{"form":{"art":"kreis","durchmesser":50},"x":0,"y":0,"stiche":null}"#;
         assert!(serde_json::from_str::<TeilDaten>(gut).is_ok());
+    }
+
+    #[test]
+    fn eine_t_pocket_aus_der_oberflaeche_hat_offene_naehte_ohne_oeffnung() {
+        let json = r#"{"form":{"art":"tpocket","breite":101.6,"hoehe":44.5,
+            "fluegelUeberstand":12.7,"fluegelHoehe":12,
+            "nahtFluegel":true,"nahtSteg":true,"nahtOeffnung":false},
+            "x":0,"y":0,"stiche":{"kantenabstand":3,"lochabstand":3,"eisen":"diamond","ecke":"ein"}}"#;
+        let t: TeilDaten = serde_json::from_str(json).unwrap();
+        let g = geometrie(&t).unwrap();
+        assert_eq!(g.stichfehler, None);
+        assert_eq!(g.linien.len(), 3);
+        assert!(g.linien.iter().all(|l| !l.geschlossen));
+        assert_eq!(g.kontur.len(), 8);
     }
 
     #[test]

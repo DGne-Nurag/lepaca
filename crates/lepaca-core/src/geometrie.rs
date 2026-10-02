@@ -142,8 +142,9 @@ impl Kontur {
         &self.punkte
     }
 
+    /// Ist Punkt `i` eine Ecke? Läuft wie [`Kontur::punkt`] ringsum weiter.
     pub fn ist_ecke(&self, i: usize) -> bool {
-        self.ecke[i]
+        self.ecke[i % self.ecke.len()]
     }
 
     pub fn ecken(&self) -> &[bool] {
