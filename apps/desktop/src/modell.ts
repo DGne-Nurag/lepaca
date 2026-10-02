@@ -1,7 +1,7 @@
 // Das Muster als reine Daten, plus Verlauf für Rückgängig/Wiederholen
 // (Kernregel 4: jede Aktion ist rückgängig zu machen).
 
-export type Eisen = "french" | "diamond" | "japan";
+export type Eisen = "french" | "diamond" | "japan" | "round";
 export type Ecke = "ein" | "aus" | "mitte";
 
 export type P = [number, number];
