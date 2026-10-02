@@ -1,0 +1,204 @@
+// Alle Texte der Oberfläche, Deutsch und Englisch (Kernregel 7).
+// Platzhalter wie {n} werden von t() ersetzt.
+
+const de = {
+  "app.titel": "lepaca",
+  "werkzeuge": "Werkzeuge",
+  "werkzeug.auswahl": "Auswählen und verschieben",
+  "werkzeug.hand": "Ansicht verschieben",
+  "werkzeug.rechteck": "Rechteck",
+  "werkzeug.kreis": "Kreis",
+  "werkzeug.ellipse": "Ellipse",
+  "hinweis.auswahl": "Teil anklicken zum Auswählen, ziehen zum Verschieben. Pfeiltasten: 1 mm, mit Umschalt 10 mm.",
+  "hinweis.hand": "Ziehen verschiebt die Ansicht. Mausrad zoomt.",
+  "hinweis.rechteck": "Rechteck aufziehen. Umschalt: Quadrat. Einfacher Klick: 80 × 50 mm.",
+  "hinweis.kreis": "Kreis aufziehen. Einfacher Klick: 60 mm Durchmesser.",
+  "hinweis.ellipse": "Ellipse aufziehen. Umschalt: Kreis. Einfacher Klick: 80 × 50 mm.",
+  "leer": "Noch keine Teile. Wähle links ein Werkzeug und ziehe auf der Fläche ein Teil auf.",
+  "rueckgaengig": "Rückgängig",
+  "wiederholen": "Wiederholen",
+  "alles.zeigen": "Alles zeigen",
+  "export": "Als PDF exportieren …",
+  "teile": "Teile",
+  "teile.keine": "Noch keine Teile",
+  "eigenschaften": "Eigenschaften",
+  "muster": "Muster",
+  "teil.name": "Name",
+  "teil.breite": "Breite",
+  "teil.hoehe": "Höhe",
+  "teil.radius": "Eckenradius",
+  "teil.durchmesser": "Durchmesser",
+  "teil.x": "Position links",
+  "teil.y": "Position oben",
+  "teil.duplizieren": "Duplizieren",
+  "teil.loeschen": "Löschen",
+  "form.rechteck": "Rechteck",
+  "form.kreis": "Kreis",
+  "form.ellipse": "Ellipse",
+  "naht": "Naht",
+  "naht.an": "Stichlöcher setzen",
+  "naht.kantenabstand": "Abstand zur Kante",
+  "naht.lochabstand": "Lochabstand (Zinken)",
+  "naht.eisen": "Eisen",
+  "naht.ecke": "Loch auf der Ecke",
+  "eisen.french": "Französisch",
+  "eisen.diamond": "Diamant",
+  "eisen.japan": "Japanisch",
+  "ecke.ein": "wie einlaufende Kante",
+  "ecke.aus": "wie auslaufende Kante",
+  "ecke.mitte": "Mitte zwischen beiden",
+  "naht.info": "{n} Löcher, davon {e} auf Ecken.",
+  "naht.angepasst": "Abstand für gleichmäßige Verteilung angepasst: {a} mm.",
+  "druck": "Druck",
+  "druck.papier": "Papier",
+  "druck.rand": "Druckrand",
+  "druck.klebekante": "Klebekante",
+  "eingabe.zahl": "Bitte eine Zahl eingeben, z. B. 3,85.",
+  "status.position": "x {x} mm   y {y} mm",
+  "status.zoom": "Zoom {z} %",
+  "export.fertig": "PDF gespeichert: {d} ({b} Blätter plus Prüfseite). Beim Drucken „Tatsächliche Größe“ wählen.",
+  "export.abgebrochen": "Export abgebrochen.",
+  "leistungstest": "Leistungstest",
+  "leistungstest.titel": "Leistungstest aus ADR 0002: 50 Teile mit 20 000 Stichlöchern, Zoomen und Verschieben",
+  "leistungstest.laeuft": "Leistungstest läuft …",
+  "leistungstest.ergebnis": "Leistungstest: {t} Teile, {l} Löcher, Berechnung {g} ms, Zeichnen im Mittel {m} ms pro Bild (95 %: {p} ms), {f} Bilder/s.",
+  "fehler.form.groesse": "Die Maße müssen zwischen 1 mm und 5 m liegen.",
+  "fehler.form.eckenradius": "Der Eckenradius darf höchstens die halbe kürzere Seite sein.",
+  "fehler.form.position": "Die Position liegt zu weit außerhalb.",
+  "fehler.form.zuVielePunkte": "Die Form ist zu groß für die Berechnung.",
+  "fehler.form.ungueltig": "Diese Form ist ungültig.",
+  "fehler.stich.lochabstand": "Der Lochabstand muss zwischen 1 und 20 mm liegen.",
+  "fehler.stich.kantenabstand": "Der Abstand zur Kante muss zwischen 0,5 und 50 mm liegen.",
+  "fehler.stich.zuVieleLoecher": "Zu viele Löcher. Bitte einen größeren Lochabstand wählen.",
+  "fehler.stich.abstandZuGross": "Der Abstand zur Kante ist für dieses Teil zu groß. Bitte verkleinern.",
+  "fehler.stich.spitze": "Die Form hat eine Spitze, an der keine Naht möglich ist.",
+  "fehler.stich.eisen": "Unbekannte Eisenart.",
+  "fehler.stich.ecke": "Unbekannte Eckausrichtung.",
+  "fehler.export.leer": "Es gibt noch keine Teile zum Exportieren.",
+  "fehler.export.zuVieleTeile": "Zu viele Teile für einen Export.",
+  "fehler.export.papier": "Unbekanntes Papierformat.",
+  "fehler.export.rand": "Der Druckrand muss zwischen 0 und 30 mm liegen.",
+  "fehler.export.klebekante": "Die Klebekante muss zwischen 0 und 50 mm liegen.",
+  "fehler.export.papierZuKlein": "Rand und Klebekante lassen auf dem Papier keinen Platz mehr.",
+  "fehler.export.zuVieleBlaetter": "Das Muster bräuchte mehr als 500 Blätter.",
+  "fehler.export.pfad": "Dieser Speicherort wird nicht unterstützt.",
+  "fehler.export.schreiben": "Die Datei konnte nicht gespeichert werden. Ist der Ordner beschreibbar?",
+  "fehler.unbekannt": "Etwas ist schiefgegangen: {f}",
+};
+
+type Schluessel = keyof typeof de;
+
+const en: Record<Schluessel, string> = {
+  "app.titel": "lepaca",
+  "werkzeuge": "Tools",
+  "werkzeug.auswahl": "Select and move",
+  "werkzeug.hand": "Pan view",
+  "werkzeug.rechteck": "Rectangle",
+  "werkzeug.kreis": "Circle",
+  "werkzeug.ellipse": "Ellipse",
+  "hinweis.auswahl": "Click a piece to select it, drag to move it. Arrow keys: 1 mm, with Shift 10 mm.",
+  "hinweis.hand": "Drag to pan. Mouse wheel zooms.",
+  "hinweis.rechteck": "Drag to draw a rectangle. Shift: square. Single click: 80 × 50 mm.",
+  "hinweis.kreis": "Drag to draw a circle. Single click: 60 mm diameter.",
+  "hinweis.ellipse": "Drag to draw an ellipse. Shift: circle. Single click: 80 × 50 mm.",
+  "leer": "No pieces yet. Pick a tool on the left and drag on the canvas to draw a piece.",
+  "rueckgaengig": "Undo",
+  "wiederholen": "Redo",
+  "alles.zeigen": "Show all",
+  "export": "Export as PDF …",
+  "teile": "Pieces",
+  "teile.keine": "No pieces yet",
+  "eigenschaften": "Properties",
+  "muster": "Pattern",
+  "teil.name": "Name",
+  "teil.breite": "Width",
+  "teil.hoehe": "Height",
+  "teil.radius": "Corner radius",
+  "teil.durchmesser": "Diameter",
+  "teil.x": "Left position",
+  "teil.y": "Top position",
+  "teil.duplizieren": "Duplicate",
+  "teil.loeschen": "Delete",
+  "form.rechteck": "Rectangle",
+  "form.kreis": "Circle",
+  "form.ellipse": "Ellipse",
+  "naht": "Stitching",
+  "naht.an": "Add stitch holes",
+  "naht.kantenabstand": "Distance from edge",
+  "naht.lochabstand": "Stitch spacing (prongs)",
+  "naht.eisen": "Chisel",
+  "naht.ecke": "Hole on corners",
+  "eisen.french": "French",
+  "eisen.diamond": "Diamond",
+  "eisen.japan": "Japanese",
+  "ecke.ein": "like incoming edge",
+  "ecke.aus": "like outgoing edge",
+  "ecke.mitte": "halfway between both",
+  "naht.info": "{n} holes, {e} of them on corners.",
+  "naht.angepasst": "Spacing adjusted for even distribution: {a} mm.",
+  "druck": "Printing",
+  "druck.papier": "Paper",
+  "druck.rand": "Print margin",
+  "druck.klebekante": "Glue strip",
+  "eingabe.zahl": "Please enter a number, e.g. 3.85.",
+  "status.position": "x {x} mm   y {y} mm",
+  "status.zoom": "Zoom {z} %",
+  "export.fertig": "PDF saved: {d} ({b} sheets plus test page). Choose “Actual size” when printing.",
+  "export.abgebrochen": "Export cancelled.",
+  "leistungstest": "Performance test",
+  "leistungstest.titel": "Performance test from ADR 0002: 50 pieces with 20,000 stitch holes, zooming and panning",
+  "leistungstest.laeuft": "Performance test running …",
+  "leistungstest.ergebnis": "Performance test: {t} pieces, {l} holes, computing {g} ms, drawing {m} ms per frame on average (95 %: {p} ms), {f} frames/s.",
+  "fehler.form.groesse": "Sizes must be between 1 mm and 5 m.",
+  "fehler.form.eckenradius": "The corner radius can be at most half the shorter side.",
+  "fehler.form.position": "The position is too far out.",
+  "fehler.form.zuVielePunkte": "The shape is too large to compute.",
+  "fehler.form.ungueltig": "This shape is invalid.",
+  "fehler.stich.lochabstand": "Stitch spacing must be between 1 and 20 mm.",
+  "fehler.stich.kantenabstand": "Distance from edge must be between 0.5 and 50 mm.",
+  "fehler.stich.zuVieleLoecher": "Too many holes. Please choose a larger spacing.",
+  "fehler.stich.abstandZuGross": "The distance from the edge is too large for this piece. Please reduce it.",
+  "fehler.stich.spitze": "The shape has a spike where no stitching is possible.",
+  "fehler.stich.eisen": "Unknown chisel type.",
+  "fehler.stich.ecke": "Unknown corner alignment.",
+  "fehler.export.leer": "There are no pieces to export yet.",
+  "fehler.export.zuVieleTeile": "Too many pieces for one export.",
+  "fehler.export.papier": "Unknown paper size.",
+  "fehler.export.rand": "The print margin must be between 0 and 30 mm.",
+  "fehler.export.klebekante": "The glue strip must be between 0 and 50 mm.",
+  "fehler.export.papierZuKlein": "Margin and glue strip leave no room on the paper.",
+  "fehler.export.zuVieleBlaetter": "The pattern would need more than 500 sheets.",
+  "fehler.export.pfad": "This location is not supported.",
+  "fehler.export.schreiben": "The file could not be saved. Is the folder writable?",
+  "fehler.unbekannt": "Something went wrong: {f}",
+};
+
+const sprache = navigator.language.toLowerCase().startsWith("de") ? "de" : "en";
+const tabelle: Record<Schluessel, string> = sprache === "de" ? de : en;
+export const dezimalKomma = sprache === "de";
+
+export type TextSchluessel = Schluessel;
+
+export function t(s: Schluessel, werte: Record<string, string | number> = {}): string {
+  return tabelle[s].replace(/\{(\w+)\}/g, (_, k: string) => String(werte[k] ?? ""));
+}
+
+/** Fehlercode aus dem Kern in einen Text übersetzen. */
+export function fehlertext(code: string): string {
+  const s = `fehler.${code}` as Schluessel;
+  return s in tabelle ? t(s) : t("fehler.unbekannt", { f: code });
+}
+
+/** Zahl mit passender Dezimalschreibweise, ohne überflüssige Nullen. */
+export function zahl(x: number, stellen = 2): string {
+  const s = String(Number(x.toFixed(stellen)));
+  return dezimalKomma ? s.replace(".", ",") : s;
+}
+
+/** Zahl aus einer Eingabe lesen; Komma und Punkt sind erlaubt. */
+export function leseZahl(s: string): number | null {
+  const x = Number(s.trim().replace(",", "."));
+  return s.trim() !== "" && Number.isFinite(x) ? x : null;
+}
+
+document.documentElement.lang = sprache;

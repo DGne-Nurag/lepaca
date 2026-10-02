@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimale Rechte: Die Oberfläche darf nur die lepaca-Befehle aufrufen. Dateidialoge öffnet der Rust-Teil selbst, die Oberfläche bekommt keinen Dateizugriff (ADR 0002).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:app:default",
+    "core:event:default",
+    "core:window:default",
+    "allow-teil-geometrie",
+    "allow-pdf-exportieren"
+  ]
+}

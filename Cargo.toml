@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/lepaca-core", "crates/lepaca-io", "crates/lepaca-cli"]
+exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.0.0"

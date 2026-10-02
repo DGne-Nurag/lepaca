@@ -1,0 +1,30 @@
+# Lieferkettenprüfung der Desktop-App (Playbook 06). Gleiche Regeln wie
+# deny.toml im Wurzelverzeichnis, mit den unten begründeten Ausnahmen.
+
+[advisories]
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    # proc-macro-error: nicht mehr gepflegt, aber keine Sicherheitslücke.
+    # Kommt nur unter Linux über gtk-rs 0.18 (glib-macros) in den Build, das
+    # Tauri 2 für WebKitGTK braucht, und läuft nur beim Kompilieren.
+    # Entfällt, sobald Tauri auf neuere gtk-rs-Versionen wechselt.
+    { id = "RUSTSEC-2024-0370", reason = "nur Build-Zeit, über gtk-rs 0.18 von Tauri" },
+]
+
+[licenses]
+private = { ignore = true }
+# Zusätzlich zur Wurzel: Apache-2.0 mit LLVM-Ausnahme (target-lexicon, nur
+# Build-Zeit). Die Ausnahme erweitert Apache-2.0 nur und ist GPL-3.0-verträglich.
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0", "Unicode-3.0", "Zlib"]
+
+[bans]
+# Tauri bringt viele doppelte Versionen mit (windows-*, syn, toml); das ist
+# Bauzeit- und Größenfrage, keine Sicherheitsfrage.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
