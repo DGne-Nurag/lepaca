@@ -15,11 +15,13 @@ use lepaca_core::stichlinie::Stichreihe;
 
 const PT_PRO_MM: f64 = 72.0 / 25.4;
 
-/// Ein Teil, wie es gedruckt wird: Schnittkante und optional Stichreihe
-/// mit Lochform. Koordinaten in Millimetern im gemeinsamen Muster.
+/// Ein Teil, wie es gedruckt wird: Schnittkante (geschlossen) oder eine
+/// offene Linie, optional mit Stichreihe und Lochform. Koordinaten in
+/// Millimetern im gemeinsamen Muster.
 #[derive(Debug, Clone, Copy)]
 pub struct Druckteil<'a> {
-    pub kontur: &'a Kontur,
+    pub umriss: &'a [Punkt],
+    pub geschlossen: bool,
     pub stiche: Option<(&'a Stichreihe, &'a Lochform)>,
 }
 
@@ -32,7 +34,8 @@ pub fn teil_gekachelt(
 ) -> Vec<u8> {
     muster_gekachelt(
         &[Druckteil {
-            kontur,
+            umriss: kontur.punkte(),
+            geschlossen: true,
             stiche: Some((stiche, loch)),
         }],
         plan,
@@ -86,13 +89,13 @@ fn kachelseite(
         bis.x >= k.von.x && von.x <= k.von.x + nb && bis.y >= k.von.y && von.y <= k.von.y + nh
     };
     for teil in teile {
-        let (von, bis) = teil.kontur.grenzen();
+        let (von, bis) = grenzen(teil.umriss);
         if !sichtbar(von, bis) {
             continue;
         }
         let _ = writeln!(s, "0 G 0.25 w");
-        pfad(&mut s, teil.kontur.punkte());
-        let _ = writeln!(s, "s");
+        linienzug(&mut s, teil.umriss);
+        let _ = writeln!(s, "{}", if teil.geschlossen { "h S" } else { "S" });
         if let Some((stiche, loch)) = teil.stiche {
             let _ = writeln!(s, "0.5 G 0.1 w [1 1] 0 d");
             for linie in &stiche.linien {
@@ -235,6 +238,16 @@ fn mm_koordinaten(s: &mut String, blatt_hoehe: f64) {
 fn pfad(s: &mut String, punkte: &[Punkt]) {
     linienzug(s, punkte);
     let _ = writeln!(s, "h");
+}
+
+fn grenzen(punkte: &[Punkt]) -> (Punkt, Punkt) {
+    let mut von = Punkt::neu(f64::INFINITY, f64::INFINITY);
+    let mut bis = Punkt::neu(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for p in punkte {
+        von = Punkt::neu(von.x.min(p.x), von.y.min(p.y));
+        bis = Punkt::neu(bis.x.max(p.x), bis.y.max(p.y));
+    }
+    (von, bis)
 }
 
 /// Linienzug ohne ihn zu schließen.
@@ -465,5 +478,29 @@ mod tests {
     fn umlaute_und_klammern_werden_fuer_pdf_maskiert() {
         assert_eq!(pdf_text("Prüfseite (1)"), "Pr\\374fseite \\(1\\)");
         assert_eq!(pdf_text("→"), "?");
+    }
+
+    #[test]
+    fn eine_offene_linie_wird_gedruckt_ohne_sie_zu_schliessen() {
+        let linie = [
+            Punkt::neu(0.0, 0.0),
+            Punkt::neu(50.0, 0.0),
+            Punkt::neu(50.0, 20.0),
+        ];
+        let plan = kacheln(
+            Punkt::neu(0.0, 0.0),
+            Punkt::neu(50.0, 20.0),
+            KachelEinstellung::default(),
+        )
+        .unwrap();
+        let teil = Druckteil {
+            umriss: &linie,
+            geschlossen: false,
+            stiche: None,
+        };
+        let t = als_text(&muster_gekachelt(&[teil], &plan));
+        // Die Linie endet mit „S“ (nur zeichnen), nicht mit „h S“ (schließen).
+        assert!(t.contains("50 20 l\nS\n"));
+        assert!(!t.contains("50 20 l\nh"));
     }
 }

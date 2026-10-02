@@ -1,11 +1,27 @@
 // lepaca – Pattern Viewer mit erster Werkzeugleiste.
 
-import { Ansicht, PX_PRO_MM, type Vorschau } from "./ansicht";
-import { enthaelt, pdfExportieren, pfadeFuer, pfadeSofort } from "./kern";
-import { neueId, neuesMuster, neueTPocket, Verlauf, type Ecke, type Eisen, type Form, type Muster, type Teil } from "./modell";
+import { Ansicht, PX_PRO_MM, type Entwurf, type Vorschau } from "./ansicht";
+import { enthaelt, formFehler, pdfExportieren, pfadeFuer, pfadeSofort } from "./kern";
+import {
+  neueId,
+  neuesMuster,
+  neueTPocket,
+  Verlauf,
+  type Ecke,
+  type Eisen,
+  type Element as Stueck,
+  type Form,
+  type Muster,
+  type P,
+  type Teil,
+} from "./modell";
+import { abstandZuLinie, auf45Grad, bogenAusWoelbung } from "./pfad";
 import { fehlertext, leseZahl, t, zahl, type TextSchluessel } from "./texte";
 
-type Werkzeug = "auswahl" | "hand" | "rechteck" | "kreis" | "ellipse" | "tpocket";
+type Werkzeug = "auswahl" | "hand" | "rechteck" | "kreis" | "ellipse" | "tpocket" | Stift;
+/** Werkzeuge, die Stück für Stück einen Pfad zeichnen. */
+type Stift = "linie" | "bogen" | "bezier";
+const istStift = (w: Werkzeug): w is Stift => w === "linie" || w === "bogen" || w === "bezier";
 
 const WERKZEUGE: { id: Werkzeug; taste: string; icon: string }[] = [
   { id: "auswahl", taste: "V", icon: '<path d="M6 3l12 9-5 1.2 3 6-2.2 1-3-6L6 18z"/>' },
@@ -14,6 +30,9 @@ const WERKZEUGE: { id: Werkzeug; taste: string; icon: string }[] = [
   { id: "kreis", taste: "K", icon: '<circle cx="12" cy="12" r="8"/>' },
   { id: "ellipse", taste: "E", icon: '<ellipse cx="12" cy="12" rx="9" ry="6"/>' },
   { id: "tpocket", taste: "T", icon: '<path d="M3 6h18v4h-4v9H7v-9H3z"/>' },
+  { id: "linie", taste: "L", icon: '<path d="M4 18L11 7l9 6"/><rect x="2.5" y="16.5" width="3" height="3"/><rect x="9.5" y="5.5" width="3" height="3"/><rect x="18.5" y="11.5" width="3" height="3"/>' },
+  { id: "bogen", taste: "B", icon: '<path d="M4 18A9 9 0 0120 18"/><rect x="2.5" y="16.5" width="3" height="3"/><rect x="18.5" y="16.5" width="3" height="3"/>' },
+  { id: "bezier", taste: "P", icon: '<path d="M4 18C6 6 18 18 20 6"/><path d="M4 18L9 9M20 6l-4 8" stroke-dasharray="2 2"/><circle cx="9" cy="9" r="1.5"/><circle cx="16" cy="14" r="1.5"/>' },
 ];
 
 // ---------------------------------------------------------------- Zustand
@@ -22,6 +41,22 @@ const verlauf = new Verlauf(neuesMuster());
 let auswahl: number | null = null;
 let werkzeug: Werkzeug = "auswahl";
 let vorschau: Vorschau | null = null;
+
+/** Pfad, der gerade mit Linie, Bogen oder Bézier gezeichnet wird. */
+interface PfadEntwurf {
+  start: P;
+  elemente: Stueck[];
+  /** Bogen: Ziel steht, jetzt wird die Wölbung gezogen. */
+  bogenZiel: P | null;
+  /** Bézier: ausgehender Griff am letzten Ankerpunkt (relativ). */
+  griff: P;
+  /** Bézier: Maus ist gedrückt, der Griff wird gezogen. */
+  ziehtGriff: boolean;
+  /** Letzte Mausposition im Muster (gerastert). */
+  maus: P;
+}
+let pfadEntwurf: PfadEntwurf | null = null;
+
 let zeichnenGeplant = false;
 
 const muster = (): Muster => verlauf.muster;
@@ -110,14 +145,14 @@ function neuZeichnen(): void {
   zeichnenGeplant = true;
   requestAnimationFrame(() => {
     zeichnenGeplant = false;
-    ansicht.zeichnen(muster(), auswahl, vorschau);
+    ansicht.zeichnen(muster(), auswahl, vorschau, entwurfFuerAnsicht());
     statusZoom.textContent = t("status.zoom", { z: Math.round((ansicht.massstab / PX_PRO_MM) * 100) });
   });
 }
 
 /** Fehlende Geometrie nachladen und danach neu zeichnen. */
 function geometrieLaden(): void {
-  const offen = muster().teile.filter((x) => !pfadeSofort(x));
+  const offen = muster().teile.filter((x) => !pfadeSofort(x) && !formFehler(x));
   if (offen.length === 0) return;
   Promise.all(offen.map(pfadeFuer))
     .then(() => {
@@ -125,6 +160,163 @@ function geometrieLaden(): void {
       eigenschaftenAktualisieren();
     })
     .catch((e: unknown) => melden(fehlertext(String(e))));
+}
+
+// ---------------------------------------------------------------- Pfad zeichnen
+
+/** Fangradius zum Schließen am Startpunkt, in Bildschirmpixeln. */
+const SCHLIESSEN_PX = 8;
+
+const letzterPunkt = (e: PfadEntwurf): P => e.elemente.at(-1)?.ziel ?? e.start;
+const gleich = (a: P, b: P) => Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9;
+const nahAmStart = (e: PfadEntwurf, q: P) =>
+  e.elemente.length >= 2 && Math.hypot(q[0] - e.start[0], q[1] - e.start[1]) * ansicht.massstab <= SCHLIESSEN_PX;
+
+/** Das Stück vom letzten Punkt bis `ziel` mit dem aktiven Werkzeug. */
+function naechstesStueck(e: PfadEntwurf, ziel: P): Stueck | null {
+  const von = letzterPunkt(e);
+  if (gleich(von, ziel)) return null;
+  if (werkzeug === "bezier") {
+    const k1: P = [von[0] + e.griff[0], von[1] + e.griff[1]];
+    return { art: "kurve", k1, k2: ziel, ziel };
+  }
+  return { art: "linie", ziel };
+}
+
+function entwurfFuerAnsicht(): Entwurf | null {
+  const e = pfadEntwurf;
+  if (!e) return null;
+  let naechstes: Stueck | null = null;
+  const griffe: [P, P][] = [];
+  const von = letzterPunkt(e);
+  if (e.bogenZiel) {
+    const b = bogenAusWoelbung(von, e.bogenZiel, e.maus);
+    naechstes = b ? { art: "bogen", ziel: e.bogenZiel, ...b } : { art: "linie", ziel: e.bogenZiel };
+  } else if (!e.ziehtGriff) {
+    naechstes = naechstesStueck(e, nahAmStart(e, e.maus) ? e.start : e.maus);
+  }
+  if (werkzeug === "bezier" && (e.griff[0] !== 0 || e.griff[1] !== 0)) {
+    griffe.push([von, [von[0] + e.griff[0], von[1] + e.griff[1]]]);
+    griffe.push([von, [von[0] - e.griff[0], von[1] - e.griff[1]]]);
+  }
+  return { start: e.start, elemente: e.elemente, naechstes, griffe, schliessbar: nahAmStart(e, e.maus) };
+}
+
+/** Mausposition im Muster: auf 1 mm gerastert (Alt: frei), mit Umschalt
+ * in 45°-Schritten zum letzten Punkt. */
+function stiftPunkt(ev: PointerEvent | MouseEvent): P {
+  const [mx, my] = ansicht.zuMuster(ev.offsetX, ev.offsetY);
+  let q: P = [mx, my];
+  if (pfadEntwurf && ev.shiftKey && !pfadEntwurf.ziehtGriff) q = auf45Grad(letzterPunkt(pfadEntwurf), q);
+  return ev.altKey ? q : [Math.round(q[0]), Math.round(q[1])];
+}
+
+function stiftMeldung(): void {
+  const e = pfadEntwurf;
+  if (!e) return melden(t(`hinweis.${werkzeug}` as TextSchluessel));
+  if (e.bogenZiel) {
+    const b = bogenAusWoelbung(letzterPunkt(e), e.bogenZiel, e.maus);
+    return melden(t("hinweis.bogenWoelben", { r: b ? zahl(b.radius, 1) : "–" }));
+  }
+  melden(t("hinweis.weiterZeichnen"));
+}
+
+function stiftDruecken(ev: PointerEvent): void {
+  const q = stiftPunkt(ev);
+  const e = pfadEntwurf;
+  if (!e) {
+    pfadEntwurf = { start: q, elemente: [], bogenZiel: null, griff: [0, 0], ziehtGriff: werkzeug === "bezier", maus: q };
+    stiftMeldung();
+    return;
+  }
+  e.maus = q;
+  if (nahAmStart(e, q) && !e.bogenZiel) {
+    if (werkzeug === "bogen") {
+      e.bogenZiel = e.start;
+    } else {
+      const s = naechstesStueck(e, e.start);
+      if (s) e.elemente.push(s);
+      pfadFertig(true);
+    }
+    return;
+  }
+  if (werkzeug === "bogen") {
+    if (!e.bogenZiel) {
+      if (!gleich(letzterPunkt(e), q)) e.bogenZiel = q;
+    } else {
+      const ziel = e.bogenZiel;
+      const b = bogenAusWoelbung(letzterPunkt(e), ziel, q);
+      // Radius auf 0,5 mm runden, aber nie kleiner als die halbe Sehne.
+      if (b) {
+        const von = letzterPunkt(e);
+        const halb = Math.hypot(ziel[0] - von[0], ziel[1] - von[1]) / 2;
+        b.radius = Math.max(halb, ev.altKey ? b.radius : Math.round(b.radius * 2) / 2);
+      }
+      e.elemente.push(b ? { art: "bogen", ziel, ...b } : { art: "linie", ziel });
+      e.bogenZiel = null;
+      if (gleich(ziel, e.start) && e.elemente.length >= 2) return pfadFertig(true);
+    }
+  } else {
+    const s = naechstesStueck(e, q);
+    if (s) e.elemente.push(s);
+    e.griff = [0, 0];
+    e.ziehtGriff = werkzeug === "bezier";
+  }
+  stiftMeldung();
+}
+
+function stiftBewegen(ev: PointerEvent): void {
+  const e = pfadEntwurf;
+  if (!e) return;
+  const q = stiftPunkt(ev);
+  if (e.ziehtGriff && ev.buttons & 1) {
+    // Bézier: Griff am letzten Ankerpunkt ziehen; der eingehende Griff des
+    // letzten Stücks wird gespiegelt, damit der Übergang glatt ist.
+    const a = letzterPunkt(e);
+    e.griff = [q[0] - a[0], q[1] - a[1]];
+    const l = e.elemente.at(-1);
+    if (l?.art === "kurve") l.k2 = [a[0] - e.griff[0], a[1] - e.griff[1]];
+  }
+  e.maus = q;
+  if (e.bogenZiel) stiftMeldung();
+}
+
+function stiftLoslassen(): void {
+  const e = pfadEntwurf;
+  if (!e) return;
+  e.ziehtGriff = false;
+  // Kurven ohne Griffe sind gerade Linien.
+  const l = e.elemente.at(-1);
+  if (l?.art === "kurve") {
+    const von = e.elemente.length > 1 ? e.elemente.at(-2)!.ziel : e.start;
+    if (gleich(l.k1, von) && gleich(l.k2, l.ziel)) e.elemente[e.elemente.length - 1] = { art: "linie", ziel: l.ziel };
+  }
+}
+
+/** Entwurf als Teil (geschlossen) oder Linie (offen) übernehmen. */
+function pfadFertig(geschlossen: boolean): void {
+  const e = pfadEntwurf;
+  pfadEntwurf = null;
+  if (!e || e.elemente.length === 0 || (geschlossen && e.elemente.length < 2)) {
+    stiftMeldung();
+    neuZeichnen();
+    return;
+  }
+  // Koordinaten relativ zum Startpunkt; der Startpunkt wird die Position.
+  const [x0, y0] = e.start;
+  const rel = (q: P): P => [q[0] - x0, q[1] - y0];
+  const elemente: Stueck[] = e.elemente.map((el) =>
+    el.art === "kurve" ? { ...el, k1: rel(el.k1), k2: rel(el.k2), ziel: rel(el.ziel) } : { ...el, ziel: rel(el.ziel) },
+  );
+  aendern((m) => {
+    const id = neueId(m);
+    const name = `${t(geschlossen ? "form.pfad" : "form.linie")} ${id}`;
+    const form: Form = { art: "pfad", start: [0, 0], elemente, geschlossen };
+    // Linien sind oft Markierungen: ohne Naht anlegen.
+    m.teile.push({ id, name, form, x: x0, y: y0, naht: geschlossen ? { ...m.standardNaht } : null });
+    auswahl = id;
+  });
+  stiftMeldung();
 }
 
 function allesAktualisieren(): void {
@@ -151,10 +343,18 @@ function aendern(f: (m: Muster) => void): void {
 }
 
 function werkzeugWaehlen(w: Werkzeug): void {
+  // Zwischen Linie, Bogen und Bézier wechseln, ohne den Pfad abzubrechen:
+  // so lassen sich die Stückarten in einem Pfad mischen.
+  if (pfadEntwurf && !istStift(w)) pfadFertig(false);
+  if (pfadEntwurf) {
+    pfadEntwurf.bogenZiel = null;
+    pfadEntwurf.griff = [0, 0];
+  }
   werkzeug = w;
   for (const [id, b] of werkzeugKnoepfe) b.setAttribute("aria-pressed", String(id === w));
   canvas.dataset["werkzeug"] = w;
-  melden(t(`hinweis.${w}` as TextSchluessel));
+  stiftMeldung();
+  neuZeichnen();
 }
 
 function teilAnlegen(form: Form, x: number, y: number): void {
@@ -293,8 +493,12 @@ function teilFelder(g: Teil): HTMLElement[] {
     el("h2", {}, t("eigenschaften")),
     textFeld(t("teil.name"), g.name, (x) => aendern(() => (g.name = x))),
   ];
+  const fehler = formFehler(g);
+  if (fehler) felder.push(el("p", { class: "meldung fehler", role: "alert" }, fehlertext(fehler)));
   if (f.art === "kreis") {
     felder.push(zahlFeld(t("teil.durchmesser"), f.durchmesser, (x) => aendern(() => (f.durchmesser = x))));
+  } else if (f.art === "pfad") {
+    felder.push(...pfadFelder(f));
   } else {
     felder.push(
       zahlFeld(t("teil.breite"), f.breite, (x) => aendern(() => (f.breite = x))),
@@ -322,8 +526,11 @@ function teilFelder(g: Teil): HTMLElement[] {
   const n = g.naht;
   if (n) {
     const merke = (m: Muster) => (m.standardNaht = { ...n });
-    felder.push(
+    // Auf einer offenen Linie sitzen die Löcher direkt auf der Linie.
+    if (f.art !== "pfad" || f.geschlossen) felder.push(
       zahlFeld(t("naht.kantenabstand"), n.kantenabstand, (x) => aendern((m) => ((n.kantenabstand = x), merke(m)))),
+    );
+    felder.push(
       zahlFeld(t("naht.lochabstand"), n.lochabstand, (x) => aendern((m) => ((n.lochabstand = x), merke(m)))),
       auswahlFeld<Eisen>(t("naht.eisen"), n.eisen, [["french", t("eisen.french")], ["diamond", t("eisen.diamond")], ["japan", t("eisen.japan")]], (x) => aendern((m) => ((n.eisen = x), merke(m)))),
       auswahlFeld<Ecke>(t("naht.ecke"), n.ecke, [["ein", t("ecke.ein")], ["aus", t("ecke.aus")], ["mitte", t("ecke.mitte")]], (x) => aendern((m) => ((n.ecke = x), merke(m)))),
@@ -361,6 +568,41 @@ function teilFelder(g: Teil): HTMLElement[] {
   return felder;
 }
 
+/** Felder für einen gezeichneten Pfad: offen/geschlossen und je Bogen
+ * Radius, Richtung und großer Bogen. */
+function pfadFelder(f: Extract<Form, { art: "pfad" }>): HTMLElement[] {
+  const felder: HTMLElement[] = [];
+  const zu = `feld-${++feldNummer}`;
+  const k = el("input", { id: zu, type: "checkbox" });
+  k.checked = f.geschlossen;
+  k.addEventListener("change", () => aendern(() => (f.geschlossen = k.checked)));
+  felder.push(el("div", { class: "feld feld-zeile" }, k, el("label", { for: zu }, t("pfad.geschlossen"))));
+  let nr = 0;
+  for (const e of f.elemente) {
+    if (e.art !== "bogen") continue;
+    nr++;
+    felder.push(el("p", { class: "feld-titel" }, t("pfad.bogen", { n: nr })));
+    felder.push(zahlFeld(t("pfad.radius"), e.radius, (x) => aendern(() => (e.radius = x))));
+    const umdrehen = el("button", { type: "button" }, t("pfad.umkehren"));
+    umdrehen.addEventListener("click", () => aendern(() => (e.uhrzeigersinn = !e.uhrzeigersinn)));
+    const id = `feld-${++feldNummer}`;
+    const gross = el("input", { id, type: "checkbox" });
+    gross.checked = e.gross;
+    gross.addEventListener("change", () => aendern(() => (e.gross = gross.checked)));
+    felder.push(
+      el("div", { class: "feld feld-zeile" }, gross, el("label", { for: id }, t("pfad.gross"))),
+      el("div", { class: "knopfzeile knopfzeile-eng" }, umdrehen),
+    );
+  }
+  const anzahl = { linien: 0, boegen: nr, kurven: 0 };
+  for (const e of f.elemente) {
+    if (e.art === "linie") anzahl.linien++;
+    if (e.art === "kurve") anzahl.kurven++;
+  }
+  felder.push(el("p", { class: "meldung" }, t("pfad.info", { l: anzahl.linien, b: anzahl.boegen, k: anzahl.kurven })));
+  return felder;
+}
+
 function musterFelder(): HTMLElement[] {
   const d = muster().druck;
   return [
@@ -394,7 +636,10 @@ function trefferBei(mx: number, my: number): Teil | undefined {
   for (let i = teile.length - 1; i >= 0; i--) {
     const x = teile[i]!;
     const p = pfadeSofort(x);
-    if (p && enthaelt(p.geometrie.kontur, mx - x.x, my - x.y)) return x;
+    if (!p) continue;
+    const g = p.geometrie;
+    const nah = abstandZuLinie(g.geschlossen ? [...g.kontur, g.kontur[0]!] : g.kontur, mx - x.x, my - x.y) * ansicht.massstab <= 6;
+    if (nah || (g.geschlossen && enthaelt(g.kontur, mx - x.x, my - x.y))) return x;
   }
   return undefined;
 }
@@ -406,6 +651,9 @@ canvas.addEventListener("pointerdown", (e) => {
   const basis = { startX: e.offsetX, startY: e.offsetY, mx, my, teilX: 0, teilY: 0, gemerkt: false };
   if (e.button === 1 || werkzeug === "hand" || leertaste) {
     ziehen = { art: "schwenken", ...basis, teilX: ansicht.versatzX, teilY: ansicht.versatzY };
+  } else if (istStift(werkzeug)) {
+    if (e.button === 0) stiftDruecken(e);
+    neuZeichnen();
   } else if (werkzeug === "auswahl") {
     const treffer = trefferBei(mx, my);
     auswahl = treffer?.id ?? null;
@@ -419,6 +667,11 @@ canvas.addEventListener("pointerdown", (e) => {
 canvas.addEventListener("pointermove", (e) => {
   const [mx, my] = ansicht.zuMuster(e.offsetX, e.offsetY);
   statusPosition.textContent = t("status.position", { x: zahl(mx, 1), y: zahl(my, 1) });
+  if (!ziehen && istStift(werkzeug)) {
+    stiftBewegen(e);
+    neuZeichnen();
+    return;
+  }
   if (!ziehen) return;
   const z = ziehen;
   if (z.art === "schwenken") {
@@ -451,6 +704,7 @@ canvas.addEventListener("pointermove", (e) => {
 });
 
 canvas.addEventListener("pointerup", () => {
+  if (istStift(werkzeug)) stiftLoslassen();
   const z = ziehen;
   ziehen = null;
   if (!z) return;
@@ -477,6 +731,10 @@ canvas.addEventListener("pointerup", () => {
   neuZeichnen();
 });
 
+canvas.addEventListener("dblclick", () => {
+  if (pfadEntwurf) pfadFertig(false);
+});
+
 canvas.addEventListener(
   "wheel",
   (e) => {
@@ -489,7 +747,17 @@ canvas.addEventListener(
 
 // ---------------------------------------------------------------- Tastatur
 
-const TASTEN: Record<string, Werkzeug> = { v: "auswahl", h: "hand", r: "rechteck", k: "kreis", e: "ellipse", t: "tpocket" };
+const TASTEN: Record<string, Werkzeug> = {
+  v: "auswahl",
+  h: "hand",
+  r: "rechteck",
+  k: "kreis",
+  e: "ellipse",
+  t: "tpocket",
+  l: "linie",
+  b: "bogen",
+  p: "bezier",
+};
 
 window.addEventListener("keydown", (e) => {
   const imFeld = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement;
@@ -513,6 +781,20 @@ window.addEventListener("keydown", (e) => {
     return;
   } else if (taste === " ") {
     leertaste = true;
+  } else if (pfadEntwurf && taste === "enter") {
+    e.preventDefault();
+    pfadFertig(false);
+  } else if (pfadEntwurf && taste === "escape") {
+    // Abbrechen: der halbe Pfad wird verworfen.
+    pfadEntwurf = null;
+    stiftMeldung();
+    neuZeichnen();
+  } else if (pfadEntwurf && taste === "backspace") {
+    e.preventDefault();
+    if (pfadEntwurf.bogenZiel) pfadEntwurf.bogenZiel = null;
+    else if (pfadEntwurf.elemente.pop() === undefined) pfadEntwurf = null;
+    stiftMeldung();
+    neuZeichnen();
   } else if (TASTEN[taste]) {
     werkzeugWaehlen(TASTEN[taste]);
   } else if (taste === "0") {

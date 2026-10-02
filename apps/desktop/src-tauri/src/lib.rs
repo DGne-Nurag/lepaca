@@ -5,8 +5,8 @@
 //! dieser Teil, die Oberfläche bekommt keinen Dateizugriff (ADR 0002).
 
 use lepaca_core::eisen::Eisenart;
-use lepaca_core::form::{Form, FormFehler, TPocketNaehte};
-use lepaca_core::geometrie::{Kontur, KonturFehler};
+use lepaca_core::form::{Form, FormFehler, OffeneLinie, Pfad, PfadElement, TPocketNaehte};
+use lepaca_core::geometrie::{Kontur, KonturFehler, Punkt};
 use lepaca_core::kachelung::{self, KachelFehler, Papier};
 use lepaca_core::mass::Mm;
 use lepaca_core::stichlinie::{self, Eckausrichtung, StichFehler, Stichreihe};
@@ -17,6 +17,28 @@ use tauri_plugin_dialog::DialogExt;
 
 /// Höchstzahl Teile in einem Muster.
 pub const MAX_TEILE: usize = 1000;
+/// Höchstzahl Elemente (Linien, Bögen, Kurven) in einem Pfad.
+pub const MAX_ELEMENTE: usize = 10_000;
+
+/// Ein Stück eines gezeichneten Pfads. Koordinaten relativ zum Teil (mm).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "art", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ElementDaten {
+    Linie {
+        ziel: [f64; 2],
+    },
+    Kurve {
+        k1: [f64; 2],
+        k2: [f64; 2],
+        ziel: [f64; 2],
+    },
+    Bogen {
+        ziel: [f64; 2],
+        radius: f64,
+        uhrzeigersinn: bool,
+        gross: bool,
+    },
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "art", rename_all = "lowercase", deny_unknown_fields)]
@@ -44,6 +66,13 @@ pub enum FormDaten {
         naht_steg: bool,
         naht_oeffnung: bool,
     },
+    /// Frei gezeichnet. Geschlossen ist es ein Teil, offen eine Linie
+    /// (z. B. Aufnähnaht, Markierung).
+    Pfad {
+        start: [f64; 2],
+        elemente: Vec<ElementDaten>,
+        geschlossen: bool,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,6 +99,8 @@ pub struct TeilDaten {
 #[serde(rename_all = "camelCase")]
 pub struct Geometrie {
     pub kontur: Vec<[f64; 2]>,
+    /// `false` bei einer offenen Linie: nicht füllen, nicht schließen.
+    pub geschlossen: bool,
     pub linien: Vec<Linie>,
     pub loecher: Vec<[[f64; 2]; 4]>,
     pub ecklocher: usize,
@@ -97,6 +128,8 @@ fn fehlercode_form(f: FormFehler) -> String {
         FormFehler::GroesseAusserhalb => "form.groesse".into(),
         FormFehler::EckenradiusZuGross => "form.eckenradius".into(),
         FormFehler::FluegelZuGross => "form.fluegel".into(),
+        FormFehler::BogenUnmoeglich => "form.bogen".into(),
+        FormFehler::PfadLeer => "form.pfadLeer".into(),
         FormFehler::Kontur(KonturFehler::ZuVielePunkte) => "form.zuVielePunkte".into(),
         FormFehler::Kontur(_) => "form.ungueltig".into(),
     }
@@ -131,15 +164,75 @@ fn eckausrichtung(name: &str) -> Result<Eckausrichtung, String> {
     }
 }
 
-/// Kontur des Teils an seiner Position im Muster, dazu die Kanten mit
-/// Naht (`None`: ringsum).
-fn kontur(teil: &TeilDaten) -> Result<(Kontur, Option<Vec<bool>>), String> {
+/// Was ein Teil zeichnet: eine geschlossene Schnittkante (mit den Kanten,
+/// die genäht werden; `None` heißt ringsum) oder eine offene Linie.
+enum Umriss {
+    Teil {
+        kontur: Kontur,
+        kanten: Option<Vec<bool>>,
+    },
+    Linie(OffeneLinie),
+}
+
+impl Umriss {
+    fn punkte(&self) -> &[Punkt] {
+        match self {
+            Umriss::Teil { kontur, .. } => kontur.punkte(),
+            Umriss::Linie(l) => &l.punkte,
+        }
+    }
+
+    fn geschlossen(&self) -> bool {
+        matches!(self, Umriss::Teil { .. })
+    }
+}
+
+fn punkt(p: [f64; 2]) -> Punkt {
+    Punkt::neu(p[0], p[1])
+}
+
+fn pfad_aus(start: [f64; 2], elemente: &[ElementDaten]) -> Result<Pfad, String> {
+    if elemente.len() > MAX_ELEMENTE {
+        return Err("form.zuVielePunkte".into());
+    }
+    let elemente = elemente
+        .iter()
+        .map(|e| {
+            Ok(match *e {
+                ElementDaten::Linie { ziel } => PfadElement::Linie(punkt(ziel)),
+                ElementDaten::Kurve { k1, k2, ziel } => PfadElement::Kurve {
+                    k1: punkt(k1),
+                    k2: punkt(k2),
+                    ziel: punkt(ziel),
+                },
+                ElementDaten::Bogen {
+                    ziel,
+                    radius,
+                    uhrzeigersinn,
+                    gross,
+                } => PfadElement::Bogen {
+                    ziel: punkt(ziel),
+                    radius: mm(radius, "form.bogen")?,
+                    uhrzeigersinn,
+                    gross,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(Pfad {
+        start: punkt(start),
+        elemente,
+    })
+}
+
+/// Umriss des Teils an seiner Position im Muster.
+fn umriss(teil: &TeilDaten) -> Result<Umriss, String> {
     if !(teil.x.is_finite() && teil.y.is_finite()) || teil.x.abs() > 1e5 || teil.y.abs() > 1e5 {
         return Err("form.position".into());
     }
     let mut kanten = None;
-    let form = match teil.form {
-        FormDaten::Rechteck {
+    let form = match &teil.form {
+        &FormDaten::Rechteck {
             breite,
             hoehe,
             eckenradius,
@@ -148,14 +241,14 @@ fn kontur(teil: &TeilDaten) -> Result<(Kontur, Option<Vec<bool>>), String> {
             hoehe: mm(hoehe, "form.groesse")?,
             eckenradius: mm(eckenradius, "form.eckenradius")?,
         },
-        FormDaten::Kreis { durchmesser } => Form::Kreis {
+        &FormDaten::Kreis { durchmesser } => Form::Kreis {
             durchmesser: mm(durchmesser, "form.groesse")?,
         },
-        FormDaten::Ellipse { breite, hoehe } => Form::Ellipse {
+        &FormDaten::Ellipse { breite, hoehe } => Form::Ellipse {
             breite: mm(breite, "form.groesse")?,
             hoehe: mm(hoehe, "form.groesse")?,
         },
-        FormDaten::Tpocket {
+        &FormDaten::Tpocket {
             breite,
             hoehe,
             fluegel_ueberstand,
@@ -179,40 +272,60 @@ fn kontur(teil: &TeilDaten) -> Result<(Kontur, Option<Vec<bool>>), String> {
                 fluegel_hoehe: mm(fluegel_hoehe, "form.fluegel")?,
             }
         }
+        FormDaten::Pfad {
+            start,
+            elemente,
+            geschlossen,
+        } => {
+            let p = pfad_aus(*start, elemente)?;
+            if !geschlossen {
+                let mut l = p.linienzug().map_err(fehlercode_form)?;
+                let d = Punkt::neu(teil.x, teil.y);
+                for q in &mut l.punkte {
+                    *q = q.plus(d);
+                }
+                return Ok(Umriss::Linie(l));
+            }
+            Form::Pfad(p)
+        }
     };
-    let k = form
+    let kontur = form
         .kontur()
         .map_err(fehlercode_form)?
         .verschoben(teil.x, teil.y);
-    Ok((k, kanten))
+    Ok(Umriss::Teil { kontur, kanten })
 }
 
 type Stiche = (Stichreihe, lepaca_core::eisen::Lochform);
 
-fn stiche(k: &Kontur, kanten: Option<&[bool]>, d: &StichDaten) -> Result<Stiche, String> {
+fn stiche(u: &Umriss, d: &StichDaten) -> Result<Stiche, String> {
     let e = stichlinie::Einstellung {
         kantenabstand: mm(d.kantenabstand, "stich.kantenabstand")?,
         lochabstand: mm(d.lochabstand, "stich.lochabstand")?,
         ecke: eckausrichtung(&d.ecke)?,
     };
     let eisen = eisenart(&d.eisen)?;
-    let reihe = match kanten {
-        Some(kanten) => stichlinie::stichreihe_an_kanten(k, kanten, e),
-        None => stichlinie::stichreihe(k, e),
+    let reihe = match u {
+        Umriss::Teil {
+            kontur,
+            kanten: Some(kanten),
+        } => stichlinie::stichreihe_an_kanten(kontur, kanten, e),
+        Umriss::Teil {
+            kontur,
+            kanten: None,
+        } => stichlinie::stichreihe(kontur, e),
+        Umriss::Linie(l) => stichlinie::stichreihe_entlang(&l.punkte, &l.ecke, e),
     }
     .map_err(fehlercode_stich)?;
     Ok((reihe, eisen.lochform(e.lochabstand)))
 }
 
-fn punkte(k: &Kontur) -> Vec<[f64; 2]> {
-    k.punkte().iter().map(|p| [p.x, p.y]).collect()
-}
-
-/// Berechnet Schnittkante, Stichlinie und Löcher eines Teils.
+/// Berechnet Schnittkante (oder Linie), Stichlinie und Löcher eines Teils.
 pub fn geometrie(teil: &TeilDaten) -> Result<Geometrie, String> {
-    let (k, kanten) = kontur(teil)?;
+    let u = umriss(teil)?;
     let mut g = Geometrie {
-        kontur: punkte(&k),
+        kontur: u.punkte().iter().map(|p| [p.x, p.y]).collect(),
+        geschlossen: u.geschlossen(),
         linien: Vec::new(),
         loecher: Vec::new(),
         ecklocher: 0,
@@ -220,7 +333,7 @@ pub fn geometrie(teil: &TeilDaten) -> Result<Geometrie, String> {
         stichfehler: None,
     };
     if let Some(d) = &teil.stiche {
-        match stiche(&k, kanten.as_deref(), d) {
+        match stiche(&u, d) {
             Ok((reihe, loch)) => {
                 g.linien = reihe
                     .linien
@@ -275,23 +388,22 @@ pub fn pdf(teile: &[TeilDaten], druck: &DruckDaten) -> Result<(Vec<u8>, usize), 
         "letter" => Papier::LETTER,
         _ => return Err("export.papier".into()),
     };
-    let mut konturen = Vec::with_capacity(teile.len());
+    let mut umrisse = Vec::with_capacity(teile.len());
     let mut alle_stiche = Vec::with_capacity(teile.len());
     for t in teile {
-        let (k, kanten) = kontur(t)?;
+        let u = umriss(t)?;
         let s = match &t.stiche {
-            Some(d) => Some(stiche(&k, kanten.as_deref(), d)?),
+            Some(d) => Some(stiche(&u, d)?),
             None => None,
         };
-        konturen.push(k);
+        umrisse.push(u);
         alle_stiche.push(s);
     }
-    let mut von = lepaca_core::geometrie::Punkt::neu(f64::INFINITY, f64::INFINITY);
-    let mut bis = lepaca_core::geometrie::Punkt::neu(f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for k in &konturen {
-        let (a, b) = k.grenzen();
-        von = lepaca_core::geometrie::Punkt::neu(von.x.min(a.x), von.y.min(a.y));
-        bis = lepaca_core::geometrie::Punkt::neu(bis.x.max(b.x), bis.y.max(b.y));
+    let mut von = Punkt::neu(f64::INFINITY, f64::INFINITY);
+    let mut bis = Punkt::neu(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for q in umrisse.iter().flat_map(|u| u.punkte()) {
+        von = Punkt::neu(von.x.min(q.x), von.y.min(q.y));
+        bis = Punkt::neu(bis.x.max(q.x), bis.y.max(q.y));
     }
     let einstellung = kachelung::Einstellung {
         papier,
@@ -305,11 +417,12 @@ pub fn pdf(teile: &[TeilDaten], druck: &DruckDaten) -> Result<(Vec<u8>, usize), 
         KachelFehler::ZuVieleBlaetter => "export.zuVieleBlaetter".to_string(),
         KachelFehler::UngueltigerBereich => "export.leer".to_string(),
     })?;
-    let druckteile: Vec<Druckteil<'_>> = konturen
+    let druckteile: Vec<Druckteil<'_>> = umrisse
         .iter()
         .zip(&alle_stiche)
-        .map(|(k, s)| Druckteil {
-            kontur: k,
+        .map(|(u, s)| Druckteil {
+            umriss: u.punkte(),
+            geschlossen: u.geschlossen(),
             stiche: s.as_ref().map(|(r, l)| (r, l)),
         })
         .collect();
@@ -441,6 +554,31 @@ mod tests {
         assert_eq!(g.linien.len(), 3);
         assert!(g.linien.iter().all(|l| !l.geschlossen));
         assert_eq!(g.kontur.len(), 8);
+    }
+
+    #[test]
+    fn ein_offener_pfad_mit_bogen_wird_eine_genaehte_linie() {
+        let json = r#"{"form":{"art":"pfad","start":[0,0],"geschlossen":false,
+            "elemente":[{"art":"linie","ziel":[30,0]},
+                        {"art":"bogen","ziel":[30,40],"radius":20,"uhrzeigersinn":true,"gross":false}]},
+            "x":10,"y":5,"stiche":{"kantenabstand":3,"lochabstand":3,"eisen":"diamond","ecke":"ein"}}"#;
+        let t: TeilDaten = serde_json::from_str(json).unwrap();
+        let g = geometrie(&t).unwrap();
+        assert!(!g.geschlossen);
+        assert_eq!(g.stichfehler, None);
+        assert_eq!(g.kontur[0], [10.0, 5.0]);
+        assert_eq!(g.linien.len(), 1);
+        assert!(!g.linien[0].geschlossen);
+    }
+
+    #[test]
+    fn ein_bogen_mit_zu_kleinem_radius_kommt_als_fehlercode() {
+        let json = r#"{"form":{"art":"pfad","start":[0,0],"geschlossen":true,
+            "elemente":[{"art":"bogen","ziel":[50,0],"radius":10,"uhrzeigersinn":true,"gross":false},
+                        {"art":"linie","ziel":[0,20]}]},
+            "x":0,"y":0,"stiche":null}"#;
+        let t: TeilDaten = serde_json::from_str(json).unwrap();
+        assert_eq!(geometrie(&t), Err("form.bogen".to_string()));
     }
 
     #[test]

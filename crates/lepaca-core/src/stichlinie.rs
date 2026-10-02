@@ -177,45 +177,78 @@ pub fn stichreihe_an_kanten(
     for start in (0..n).filter(|&i| kanten[i] && !kanten[(i + n - 1) % n]) {
         let laenge = (0..n).take_while(|&k| kanten[(start + k) % n]).count();
         let punkte: Vec<Punkt> = (0..=laenge).map(|k| linie.punkt(start + k)).collect();
-        // Innerhalb der Naht an den Ecken teilen, wie ringsum.
-        let mut teil_start = 0;
-        for k in 1..=laenge {
-            if k < laenge && !linie.ist_ecke(start + k) {
-                continue;
-            }
-            let von = teil_start;
-            let richtung = if von == 0 {
-                punkte[1]
-                    .minus(punkte[0])
-                    .normiert()
-                    .unwrap_or(Punkt::neu(1.0, 0.0))
-            } else {
-                richtung_an_punkt(&linie, start + von, e.ecke)
-            };
-            let anfang = Stichloch {
-                mitte: punkte[von],
-                richtung,
-                auf_ecke: von > 0 || linie.ist_ecke(start),
-            };
-            abschnitt_legen(&mut r, |i| punkte[von + i], k - von, anfang, e)?;
-            teil_start = k;
-        }
-        // Endloch der offenen Naht.
-        let ende = punkte[laenge];
-        r.loecher.push(Stichloch {
-            mitte: ende,
-            richtung: ende
-                .minus(punkte[laenge - 1])
-                .normiert()
-                .unwrap_or(Punkt::neu(1.0, 0.0)),
-            auf_ecke: linie.ist_ecke(start + laenge),
-        });
-        r.linien.push(Linienzug {
-            punkte,
-            geschlossen: false,
-        });
+        let ecke: Vec<bool> = (0..=laenge).map(|k| linie.ist_ecke(start + k)).collect();
+        offene_naht(&mut r, punkte, &ecke, e)?;
     }
     Ok(r)
+}
+
+/// Setzt Stichlöcher direkt auf eine offene Linie, z. B. die Naht, mit der
+/// eine Lasche oder Tasche auf ein Teil genäht wird. Einen Kantenabstand
+/// gibt es hier nicht: Die Linie ist schon die Stichlinie.
+pub fn stichreihe_entlang(
+    punkte: &[Punkt],
+    ecke: &[bool],
+    e: Einstellung,
+) -> Result<Stichreihe, StichFehler> {
+    if !LOCHABSTAND_MM.contains(&e.lochabstand.wert()) {
+        return Err(StichFehler::LochabstandAusserhalb);
+    }
+    if punkte.len() < 2 || ecke.len() != punkte.len() {
+        return Err(StichFehler::KantenUnpassend);
+    }
+    let mut r = Stichreihe {
+        linien: Vec::new(),
+        loecher: Vec::new(),
+        abschnitte: Vec::new(),
+    };
+    offene_naht(&mut r, punkte.to_vec(), ecke, e)?;
+    Ok(r)
+}
+
+/// Eine offene Naht: an Knicken in Abschnitte geteilt, mit Loch am Anfang,
+/// auf jedem Knick und am Ende.
+fn offene_naht(
+    r: &mut Stichreihe,
+    punkte: Vec<Punkt>,
+    ecke: &[bool],
+    e: Einstellung,
+) -> Result<(), StichFehler> {
+    let laenge = punkte.len() - 1;
+    let richtung_bei = |i: usize| {
+        let ein = (i > 0)
+            .then(|| punkte[i].minus(punkte[i - 1]).normiert())
+            .flatten();
+        let aus = (i < laenge)
+            .then(|| punkte[i + 1].minus(punkte[i]).normiert())
+            .flatten();
+        richtung_zwischen(ein, aus, e.ecke)
+    };
+    let mut teil_start = 0;
+    for k in 1..=laenge {
+        if k < laenge && !ecke[k] {
+            continue;
+        }
+        let von = teil_start;
+        let anfang = Stichloch {
+            mitte: punkte[von],
+            richtung: richtung_bei(von),
+            auf_ecke: ecke[von],
+        };
+        abschnitt_legen(r, |i| punkte[von + i], k - von, anfang, e)?;
+        teil_start = k;
+    }
+    // Endloch der offenen Naht.
+    r.loecher.push(Stichloch {
+        mitte: punkte[laenge],
+        richtung: richtung_bei(laenge),
+        auf_ecke: ecke[laenge],
+    });
+    r.linien.push(Linienzug {
+        punkte,
+        geschlossen: false,
+    });
+    Ok(())
 }
 
 /// Verteilt die Löcher auf einem Abschnitt mit `schritte` Kanten, dessen
@@ -278,6 +311,12 @@ fn richtung_an_punkt(linie: &Kontur, i: usize, ecke: Eckausrichtung) -> Punkt {
     } else {
         Eckausrichtung::Mitte
     };
+    richtung_zwischen(ein, aus, ausrichtung)
+}
+
+/// Richtung aus ein- und auslaufender Kante; fehlt eine (Nahtende), zählt
+/// die andere.
+fn richtung_zwischen(ein: Option<Punkt>, aus: Option<Punkt>, ausrichtung: Eckausrichtung) -> Punkt {
     match (ein, aus) {
         (Some(a), Some(_)) if ausrichtung == Eckausrichtung::Einlaufend => a,
         (Some(_), Some(b)) if ausrichtung == Eckausrichtung::Auslaufend => b,
@@ -535,5 +574,32 @@ mod tests {
             stichreihe_an_kanten(&k, &[true, false], einstellung(3.0, 3.0)),
             Err(StichFehler::KantenUnpassend)
         );
+    }
+
+    #[test]
+    fn eine_gerade_linie_von_30_mm_bekommt_11_loecher_im_abstand_3() {
+        let punkte = [Punkt::neu(0.0, 0.0), Punkt::neu(30.0, 0.0)];
+        let r = stichreihe_entlang(&punkte, &[true, true], einstellung(3.0, 3.0)).unwrap();
+        assert_eq!(r.loecher.len(), 11);
+        assert!(r.loecher[0].mitte.abstand(punkte[0]) < TOLERANZ_MM);
+        assert!(r.loecher[10].mitte.abstand(punkte[1]) < TOLERANZ_MM);
+        assert!(r.loecher.iter().all(|l| l.mitte.y.abs() < TOLERANZ_MM));
+    }
+
+    #[test]
+    fn auf_dem_knick_einer_offenen_linie_sitzt_ein_loch() {
+        let punkte = [
+            Punkt::neu(0.0, 0.0),
+            Punkt::neu(20.0, 0.0),
+            Punkt::neu(20.0, 13.0),
+        ];
+        let r = stichreihe_entlang(&punkte, &[true, true, true], einstellung(3.0, 4.0)).unwrap();
+        assert!(
+            r.loecher
+                .iter()
+                .any(|l| l.auf_ecke && l.mitte.abstand(punkte[1]) < TOLERANZ_MM)
+        );
+        // 20 mm → 5 Abstände, 13 mm → 3 Abstände, also 9 Löcher.
+        assert_eq!(r.loecher.len(), 9);
     }
 }

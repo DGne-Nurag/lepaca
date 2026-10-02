@@ -97,8 +97,9 @@ impl TPocketNaehte {
 /// Mindestbreite des Stegs, damit noch eine Karte hält und genäht werden kann.
 pub const MIN_STEG_MM: f64 = 10.0;
 
-/// Ein geschlossener Pfad. Nach dem letzten Element wird automatisch
-/// zum Start zurückgezogen.
+/// Ein Pfad aus Linien, Bögen und Kurven. Als Teil ([`Form::Pfad`]) wird
+/// nach dem letzten Element automatisch zum Start zurückgezogen; als
+/// offene Linie liefert [`Pfad::linienzug`] die Punkte ohne Schluss.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pfad {
     pub start: Punkt,
@@ -114,6 +115,16 @@ pub enum PfadElement {
         k2: Punkt,
         ziel: Punkt,
     },
+    /// Kreisbogen zum Ziel mit festem Radius. Durch zwei Punkte passen bei
+    /// gegebenem Radius vier Bögen; `uhrzeigersinn` (so wie man auf den
+    /// Bildschirm schaut) und `gross` (mehr als ein Halbkreis) wählen einen
+    /// davon aus, wie bei SVG.
+    Bogen {
+        ziel: Punkt,
+        radius: Mm,
+        uhrzeigersinn: bool,
+        gross: bool,
+    },
 }
 
 /// Warum eine Form nicht gebaut werden kann.
@@ -127,6 +138,11 @@ pub enum FormFehler {
     FluegelZuGross,
     /// Der Eckenradius ist größer als die halbe kürzere Seite.
     EckenradiusZuGross,
+    /// Ein Bogen ist unmöglich: Der Radius ist kleiner als der halbe
+    /// Abstand von Start und Ziel, oder Start und Ziel fallen zusammen.
+    BogenUnmoeglich,
+    /// Ein offener Pfad braucht mindestens ein Element.
+    PfadLeer,
     Kontur(KonturFehler),
 }
 
@@ -260,7 +276,19 @@ fn ist_knick(ein: Option<Punkt>, aus: Option<Punkt>) -> bool {
     }
 }
 
-fn pfad(p: &Pfad) -> Result<Kontur, FormFehler> {
+/// Pfad in Punkte zerlegt, mit Knick-Markierung je Punkt und den
+/// Tangenten am Anfang und Ende (für den Schluss eines geschlossenen Pfads).
+struct Abgeflacht {
+    punkte: Vec<Punkt>,
+    ecke: Vec<bool>,
+    erste_tangente: Option<Punkt>,
+    letzte_tangente: Option<Punkt>,
+}
+
+fn abflachen(p: &Pfad) -> Result<Abgeflacht, FormFehler> {
+    if !p.start.ist_endlich() {
+        return Err(KonturFehler::UngueltigeZahl.into());
+    }
     let mut punkte = vec![p.start];
     let mut ecke = vec![false];
     let mut letzte_tangente: Option<Punkt> = None;
@@ -275,7 +303,16 @@ fn pfad(p: &Pfad) -> Result<Kontur, FormFehler> {
                 let t_ende = ziel.minus(if ziel.abstand(k2) > 1e-9 { k2 } else { k1 });
                 (t_start, t_ende, kurve_flach(von, k1, k2, ziel))
             }
+            PfadElement::Bogen {
+                ziel,
+                radius,
+                uhrzeigersinn,
+                gross,
+            } => bogen_flach(von, ziel, radius.wert(), uhrzeigersinn, gross)?,
         };
+        if neue.iter().any(|q| !q.ist_endlich()) {
+            return Err(KonturFehler::UngueltigeZahl.into());
+        }
         if erste_tangente.is_none() {
             erste_tangente = Some(t_start);
         }
@@ -290,6 +327,21 @@ fn pfad(p: &Pfad) -> Result<Kontur, FormFehler> {
         }
         letzte_tangente = Some(t_ende);
     }
+    Ok(Abgeflacht {
+        punkte,
+        ecke,
+        erste_tangente,
+        letzte_tangente,
+    })
+}
+
+fn pfad(p: &Pfad) -> Result<Kontur, FormFehler> {
+    let Abgeflacht {
+        mut punkte,
+        mut ecke,
+        erste_tangente,
+        mut letzte_tangente,
+    } = abflachen(p)?;
 
     // Schließen: entweder endet der Pfad schon am Start, oder es kommt eine
     // gerade Schlusslinie dazu.
@@ -309,6 +361,99 @@ fn pfad(p: &Pfad) -> Result<Kontur, FormFehler> {
     let (min, max) = kontur.grenzen();
     pruefe_groesse((max.x - min.x).max(max.y - min.y))?;
     Ok(kontur)
+}
+
+/// Eine offene Linie: Punkte und je Punkt, ob dort ein Knick ist. Anfang
+/// und Ende zählen als Knick, damit eine Naht dort ein Loch bekommt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OffeneLinie {
+    pub punkte: Vec<Punkt>,
+    pub ecke: Vec<bool>,
+}
+
+impl Pfad {
+    /// Der Pfad als offene Linie, ohne Schluss zum Start.
+    pub fn linienzug(&self) -> Result<OffeneLinie, FormFehler> {
+        if self.elemente.is_empty() {
+            return Err(FormFehler::PfadLeer);
+        }
+        let Abgeflacht {
+            mut punkte,
+            mut ecke,
+            ..
+        } = abflachen(self)?;
+        // Doppelte Punkte (Element der Länge null) entfernen.
+        let mut i = 1;
+        while i < punkte.len() {
+            if punkte[i].abstand(punkte[i - 1]) < 1e-9 {
+                ecke[i - 1] |= ecke[i];
+                punkte.remove(i);
+                ecke.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        if punkte.len() < 2 {
+            return Err(FormFehler::PfadLeer);
+        }
+        ecke[0] = true;
+        let n = ecke.len();
+        ecke[n - 1] = true;
+        let (mut min, mut max) = (punkte[0], punkte[0]);
+        for q in &punkte {
+            min = Punkt::neu(min.x.min(q.x), min.y.min(q.y));
+            max = Punkt::neu(max.x.max(q.x), max.y.max(q.y));
+        }
+        if (max.x - min.x).max(max.y - min.y) > MAX_GROESSE_MM {
+            return Err(FormFehler::GroesseAusserhalb);
+        }
+        Ok(OffeneLinie { punkte, ecke })
+    }
+}
+
+/// Teilt einen Kreisbogen auf. Liefert Start- und Endtangente und die
+/// Punkte ohne den Startpunkt.
+fn bogen_flach(
+    von: Punkt,
+    ziel: Punkt,
+    r: f64,
+    uhrzeigersinn: bool,
+    gross: bool,
+) -> Result<(Punkt, Punkt, Vec<Punkt>), FormFehler> {
+    let sehne = ziel.minus(von);
+    let d = sehne.laenge();
+    if d < 1e-6 || r < d / 2.0 - 1e-6 || !r.is_finite() {
+        return Err(FormFehler::BogenUnmoeglich);
+    }
+    let r = r.max(d / 2.0);
+    let h = (r * r - d * d / 4.0).max(0.0).sqrt();
+    let mitte = von.plus(sehne.mal(0.5));
+    let quer = Punkt::neu(-sehne.y / d, sehne.x / d);
+
+    // Winkel wachsen auf dem Bildschirm (y nach unten) im Uhrzeigersinn.
+    let richtung = if uhrzeigersinn { 1.0 } else { -1.0 };
+    let spanne = |c: Punkt| {
+        let w0 = (von.y - c.y).atan2(von.x - c.x);
+        let w1 = (ziel.y - c.y).atan2(ziel.x - c.x);
+        (w0, ((w1 - w0) * richtung).rem_euclid(TAU))
+    };
+    let mut zentrum = mitte.plus(quer.mal(h));
+    let (mut w0, mut s) = spanne(zentrum);
+    if (s > PI + 1e-9) != gross {
+        zentrum = mitte.minus(quer.mal(h));
+        (w0, s) = spanne(zentrum);
+    }
+    let n = (s / bogen_schritt(r)).ceil().clamp(1.0, 10_000.0) as usize;
+    let mut punkte: Vec<Punkt> = (1..n)
+        .map(|i| {
+            let w = w0 + richtung * s * i as f64 / n as f64;
+            zentrum.plus(Punkt::neu(w.cos(), w.sin()).mal(r))
+        })
+        .collect();
+    // Das Ziel exakt treffen statt über cos/sin anzunähern.
+    punkte.push(ziel);
+    let tangente = |w: f64| Punkt::neu(-w.sin(), w.cos()).mal(richtung);
+    Ok((tangente(w0), tangente(w0 + richtung * s), punkte))
 }
 
 /// Teilt eine kubische Bézierkurve gleichmäßig auf. Die Schrittzahl folgt aus
@@ -473,5 +618,109 @@ mod tests {
             t_pocket(80.0, 40.0, 10.0, 40.0),
             Err(FormFehler::FluegelZuGross)
         );
+    }
+
+    fn bogen(ziel: (f64, f64), r: f64, uhrzeigersinn: bool, gross: bool) -> PfadElement {
+        PfadElement::Bogen {
+            ziel: Punkt::neu(ziel.0, ziel.1),
+            radius: mm(r),
+            uhrzeigersinn,
+            gross,
+        }
+    }
+
+    #[test]
+    fn ein_halbkreisbogen_mit_radius_25_ist_so_lang_wie_ein_halber_kreis() {
+        let p = Pfad {
+            start: Punkt::neu(0.0, 0.0),
+            elemente: vec![bogen((50.0, 0.0), 25.0, true, false)],
+        };
+        let l = p.linienzug().unwrap();
+        let laenge: f64 = l.punkte.windows(2).map(|w| w[0].abstand(w[1])).sum();
+        assert!((laenge - PI * 25.0).abs() < 0.05, "{laenge}");
+        // Im Uhrzeigersinn von links nach rechts wölbt er sich nach oben
+        // (y zeigt nach unten).
+        assert!(l.punkte.iter().all(|q| q.y <= TOLERANZ_MM));
+        assert!(l.punkte.iter().any(|q| (q.y + 25.0).abs() < 0.02));
+    }
+
+    #[test]
+    fn alle_punkte_eines_bogens_liegen_im_radius_um_den_mittelpunkt() {
+        // Kleiner Bogen mit 40 mm Radius über eine 30-mm-Sehne, gegen den
+        // Uhrzeigersinn: wölbt sich nach unten.
+        let p = Pfad {
+            start: Punkt::neu(0.0, 0.0),
+            elemente: vec![bogen((30.0, 0.0), 40.0, false, false)],
+        };
+        let l = p.linienzug().unwrap();
+        let h = (40.0f64 * 40.0 - 15.0 * 15.0).sqrt();
+        let zentrum = Punkt::neu(15.0, -h);
+        for q in &l.punkte {
+            assert!((q.abstand(zentrum) - 40.0).abs() < 1e-6, "{q:?}");
+        }
+        assert!(l.punkte.iter().all(|q| q.y >= -TOLERANZ_MM));
+    }
+
+    #[test]
+    fn der_grosse_bogen_geht_um_mehr_als_den_halbkreis() {
+        let laenge = |gross| {
+            let p = Pfad {
+                start: Punkt::neu(0.0, 0.0),
+                elemente: vec![bogen((30.0, 0.0), 20.0, true, gross)],
+            };
+            let l = p.linienzug().unwrap();
+            l.punkte.windows(2).map(|w| w[0].abstand(w[1])).sum::<f64>()
+        };
+        let klein = laenge(false);
+        let gross = laenge(true);
+        assert!((klein + gross - TAU * 20.0).abs() < 0.1);
+        assert!(gross > PI * 20.0 && klein < PI * 20.0);
+    }
+
+    #[test]
+    fn ein_zu_kleiner_radius_wird_abgewiesen() {
+        let p = Pfad {
+            start: Punkt::neu(0.0, 0.0),
+            elemente: vec![bogen((50.0, 0.0), 20.0, true, false)],
+        };
+        assert_eq!(p.linienzug(), Err(FormFehler::BogenUnmoeglich));
+    }
+
+    #[test]
+    fn eine_taschenklappe_aus_linien_und_bogen_hat_ecken_nur_an_den_knicken() {
+        // Rechteck 60 × 30, unten ein Bogen mit 40 mm Radius statt der Kante.
+        let pfad = Pfad {
+            start: Punkt::neu(0.0, 0.0),
+            elemente: vec![
+                PfadElement::Linie(Punkt::neu(60.0, 0.0)),
+                PfadElement::Linie(Punkt::neu(60.0, 30.0)),
+                bogen((0.0, 30.0), 40.0, true, false),
+            ],
+        };
+        let k = Form::Pfad(pfad).kontur().unwrap();
+        assert_eq!(k.ecken().iter().filter(|e| **e).count(), 4);
+        let (_, bis) = k.grenzen();
+        // Der Bogen wölbt sich nach unten über die 30 mm hinaus.
+        let h = 40.0 - (40.0f64 * 40.0 - 30.0 * 30.0).sqrt();
+        assert!((bis.y - (30.0 + h)).abs() < 0.02, "{}", bis.y);
+    }
+
+    #[test]
+    fn eine_offene_linie_hat_an_beiden_enden_einen_knick() {
+        let p = Pfad {
+            start: Punkt::neu(0.0, 0.0),
+            elemente: vec![
+                PfadElement::Linie(Punkt::neu(40.0, 0.0)),
+                PfadElement::Linie(Punkt::neu(40.0, 20.0)),
+            ],
+        };
+        let l = p.linienzug().unwrap();
+        assert_eq!(l.punkte.len(), 3);
+        assert_eq!(l.ecke, vec![true, true, true]);
+        let leer = Pfad {
+            start: Punkt::neu(0.0, 0.0),
+            elemente: vec![],
+        };
+        assert_eq!(leer.linienzug(), Err(FormFehler::PfadLeer));
     }
 }
