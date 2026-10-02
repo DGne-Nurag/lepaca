@@ -102,7 +102,7 @@ pub struct Geometrie {
     /// `false` bei einer offenen Linie: nicht füllen, nicht schließen.
     pub geschlossen: bool,
     pub linien: Vec<Linie>,
-    pub loecher: Vec<[[f64; 2]; 4]>,
+    pub loecher: Vec<Vec<[f64; 2]>>,
     pub ecklocher: usize,
     /// Tatsächliche Lochabstände je Abschnitt (mm).
     pub abstaende: Vec<f64>,
@@ -151,6 +151,7 @@ fn eisenart(name: &str) -> Result<Eisenart, String> {
         "french" => Ok(Eisenart::Franzoesisch),
         "diamond" => Ok(Eisenart::Diamant),
         "japan" => Ok(Eisenart::Japanisch),
+        "round" => Ok(Eisenart::Rund),
         _ => Err("stich.eisen".into()),
     }
 }
@@ -347,7 +348,7 @@ pub fn geometrie(teil: &TeilDaten) -> Result<Geometrie, String> {
                 g.loecher = reihe
                     .loecher
                     .iter()
-                    .map(|l| loch.umriss(l).map(|p| [p.x, p.y]))
+                    .map(|l| loch.umriss(l).iter().map(|p| [p.x, p.y]).collect())
                     .collect();
                 g.abstaende = reihe
                     .abschnitte
@@ -568,6 +569,18 @@ mod tests {
         assert_eq!(g.ecklocher, 4);
         assert_eq!(g.loecher.len(), 60);
         assert!(g.stichfehler.is_none());
+    }
+
+    #[test]
+    fn mit_rundem_eisen_werden_die_loecher_rund() {
+        let mut t = rechteck(0.0, 0.0);
+        if let Some(n) = t.stiche.as_mut() {
+            n.eisen = "round".into();
+        }
+        let g = geometrie(&t).unwrap();
+        assert!(!g.loecher.is_empty());
+        // Runde Löcher sind feine Vielecke, keine Rauten mit vier Ecken.
+        assert!(g.loecher.iter().all(|l| l.len() > 4));
     }
 
     #[test]

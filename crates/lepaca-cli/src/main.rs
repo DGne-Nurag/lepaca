@@ -29,7 +29,8 @@ Optionen (alle Maße in Millimetern):
   --durchmesser <mm>              Durchmesser (Kreis)
   --fluegel <mm>                  Flügelüberstand je Seite (T-Pocket, Standard: 12.7)
   --fluegelhoehe <mm>             Flügelhöhe ab Öffnung (T-Pocket, Standard: 12)
-  --eisen french|diamond|japan    Eisenart (Standard: diamond)
+  --eisen french|diamond|japan|round
+                                  Eisenart (Standard: diamond)
   --lochabstand <mm>              Zinkenabstand (Standard: 3.85)
   --kantenabstand <mm>            Abstand der Naht zur Kante (Standard: 3)
   --ecke ein|aus|mitte            Ausrichtung des Ecklochs (Standard: ein,
@@ -173,9 +174,10 @@ fn erzeugen(o: Optionen, format: Format) -> Result<String, String> {
         "french" | "franzoesisch" => Eisenart::Franzoesisch,
         "diamond" | "diamant" => Eisenart::Diamant,
         "japan" | "japanisch" => Eisenart::Japanisch,
+        "round" | "rund" => Eisenart::Rund,
         e => {
             return Err(format!(
-                "Unbekannte Eisenart „{e}“. Möglich: french, diamond, japan."
+                "Unbekannte Eisenart „{e}“. Möglich: french, diamond, japan, round."
             ));
         }
     };

@@ -10,7 +10,7 @@ export interface Geometrie {
   /** false: offene Linie, nicht füllen. */
   geschlossen: boolean;
   linien: { punkte: P[]; geschlossen: boolean }[];
-  loecher: [P, P, P, P][];
+  loecher: P[][];
   ecklocher: number;
   abstaende: number[];
   stichfehler: string | null;

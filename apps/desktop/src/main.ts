@@ -532,7 +532,7 @@ function teilFelder(g: Teil): HTMLElement[] {
     );
     felder.push(
       zahlFeld(t("naht.lochabstand"), n.lochabstand, (x) => aendern((m) => ((n.lochabstand = x), merke(m)))),
-      auswahlFeld<Eisen>(t("naht.eisen"), n.eisen, [["french", t("eisen.french")], ["diamond", t("eisen.diamond")], ["japan", t("eisen.japan")]], (x) => aendern((m) => ((n.eisen = x), merke(m)))),
+      auswahlFeld<Eisen>(t("naht.eisen"), n.eisen, [["french", t("eisen.french")], ["diamond", t("eisen.diamond")], ["japan", t("eisen.japan")], ["round", t("eisen.round")]], (x) => aendern((m) => ((n.eisen = x), merke(m)))),
       auswahlFeld<Ecke>(t("naht.ecke"), n.ecke, [["ein", t("ecke.ein")], ["aus", t("ecke.aus")], ["mitte", t("ecke.mitte")]], (x) => aendern((m) => ((n.ecke = x), merke(m)))),
     );
     if (f.art === "tpocket") {
