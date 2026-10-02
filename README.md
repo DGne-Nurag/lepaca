@@ -34,3 +34,13 @@ Die Rust-Version ist in `rust-toolchain.toml` festgelegt und wird von `rustup` a
 ## Lizenz
 
 GPL-3.0-or-later, siehe [LICENSE](LICENSE) und [ADR 0003](docs/adr/0003-lizenz-gpl-3.md). Mit lepaca erstellte Schnittmuster gehören dir und fallen nicht unter die GPL.
+
+## Test-Binaries
+
+Jeder CI-Lauf erzeugt unsignierte Test-Binaries für Linux (x86_64, statisch), Windows (x86_64) und macOS (Apple Silicon). Zu finden im Reiter *Actions* → Lauf auswählen → *Artifacts*. Sie sind nur zum Ausprobieren gedacht; signierte Releases folgen später (Playbook 06).
+
+```sh
+lepaca pdf --breite 300 --hoehe 200 --radius 5 --eisen french --ausgabe teil.pdf
+```
+
+Unter macOS muss das unsignierte Binary einmal per Rechtsklick → Öffnen bzw. `xattr -d com.apple.quarantine lepaca` freigegeben werden.
