@@ -4,6 +4,14 @@
 export type Eisen = "french" | "diamond" | "japan";
 export type Ecke = "ein" | "aus" | "mitte";
 
+export type P = [number, number];
+
+/** Ein Stück eines gezeichneten Pfads; Koordinaten relativ zum Teil (mm). */
+export type Element =
+  | { art: "linie"; ziel: P }
+  | { art: "kurve"; k1: P; k2: P; ziel: P }
+  | { art: "bogen"; ziel: P; radius: number; uhrzeigersinn: boolean; gross: boolean };
+
 export type Form =
   | { art: "rechteck"; breite: number; hoehe: number; eckenradius: number }
   | { art: "kreis"; durchmesser: number }
@@ -17,7 +25,8 @@ export type Form =
       nahtFluegel: boolean;
       nahtSteg: boolean;
       nahtOeffnung: boolean;
-    };
+    }
+  | { art: "pfad"; start: P; elemente: Element[]; geschlossen: boolean };
 
 export interface Naht {
   kantenabstand: number;
@@ -75,6 +84,12 @@ export function ausdehnung(f: Form): { breite: number; hoehe: number } {
   switch (f.art) {
     case "kreis":
       return { breite: f.durchmesser, hoehe: f.durchmesser };
+    case "pfad": {
+      // Grob über alle Punkte; nur für die Anzeige.
+      const xs = [f.start[0], ...f.elemente.map((e) => e.ziel[0])];
+      const ys = [f.start[1], ...f.elemente.map((e) => e.ziel[1])];
+      return { breite: Math.max(...xs) - Math.min(...xs), hoehe: Math.max(...ys) - Math.min(...ys) };
+    }
     default:
       return { breite: f.breite, hoehe: f.hoehe };
   }

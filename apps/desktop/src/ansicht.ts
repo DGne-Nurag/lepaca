@@ -3,7 +3,20 @@
 // damit die Leistung nicht an der Anzahl der Löcher hängt (ADR 0002).
 
 import { pfadeSofort, type Pfade } from "./kern";
-import type { Muster, Teil } from "./modell";
+import type { Element, Muster, P, Teil } from "./modell";
+import { elementeZeichnen } from "./pfad";
+
+/** Pfad, der gerade gezeichnet wird, mit dem Stück bis zur Maus. */
+export interface Entwurf {
+  start: P;
+  elemente: Element[];
+  /** Vorschau des nächsten Stücks (folgt der Maus). */
+  naechstes: Element | null;
+  /** Bézier-Griffe zum Anzeigen: Ankerpunkt und Griffende. */
+  griffe: [P, P][];
+  /** Maus ist nah genug am Start zum Schließen. */
+  schliessbar: boolean;
+}
 
 /** CSS-Pixel pro Millimeter bei „100 %“ (96 dpi). Der echte Bildschirm
  * kann abweichen; maßgenau ist nur der Druck. */
@@ -76,7 +89,7 @@ export class Ansicht {
     this.versatzY = (this.hoehe - h * this.massstab) / 2 - min[1]! * this.massstab;
   }
 
-  zeichnen(muster: Muster, auswahl: number | null, vorschau: Vorschau | null): void {
+  zeichnen(muster: Muster, auswahl: number | null, vorschau: Vorschau | null, entwurf: Entwurf | null = null): void {
     const c = this.ctx;
     const stil = getComputedStyle(this.canvas);
     const farbe = (n: string) => stil.getPropertyValue(n).trim() || "#000";
@@ -104,6 +117,8 @@ export class Ansicht {
       }
       this.teil(t, p, t.id === auswahl, px, farbe);
     }
+
+    if (entwurf) this.entwurf(entwurf, px, farbe);
 
     if (vorschau) {
       c.save();
@@ -142,12 +157,57 @@ export class Ansicht {
     }
   }
 
+  private entwurf(e: Entwurf, px: number, farbe: (n: string) => string): void {
+    const c = this.ctx;
+    c.save();
+    c.lineWidth = 1.5 * px;
+    c.strokeStyle = farbe("--kante");
+    c.beginPath();
+    c.moveTo(e.start[0], e.start[1]);
+    elementeZeichnen(c, e.start, e.elemente);
+    c.stroke();
+    if (e.naechstes) {
+      const letzter = e.elemente.at(-1)?.ziel ?? e.start;
+      c.setLineDash([4 * px, 3 * px]);
+      c.strokeStyle = farbe("--auswahl");
+      c.beginPath();
+      c.moveTo(letzter[0], letzter[1]);
+      elementeZeichnen(c, letzter, [e.naechstes]);
+      c.stroke();
+      c.setLineDash([]);
+    }
+    // Griffe und Ankerpunkte.
+    c.strokeStyle = farbe("--auswahl");
+    c.fillStyle = farbe("--flaeche");
+    c.lineWidth = 1 * px;
+    for (const [a, g] of e.griffe) {
+      c.beginPath();
+      c.moveTo(a[0], a[1]);
+      c.lineTo(g[0], g[1]);
+      c.stroke();
+      c.beginPath();
+      c.arc(g[0], g[1], 3 * px, 0, Math.PI * 2);
+      c.fill();
+      c.stroke();
+    }
+    const anker = [e.start, ...e.elemente.map((x) => x.ziel)];
+    for (const [i, a] of anker.entries()) {
+      const r = (i === 0 && e.schliessbar ? 6 : 3.5) * px;
+      c.fillStyle = i === 0 && e.schliessbar ? farbe("--auswahl") : farbe("--flaeche");
+      c.fillRect(a[0] - r, a[1] - r, 2 * r, 2 * r);
+      c.strokeRect(a[0] - r, a[1] - r, 2 * r, 2 * r);
+    }
+    c.restore();
+  }
+
   private teil(t: Teil, p: Pfade, gewaehlt: boolean, px: number, farbe: (n: string) => string): void {
     const c = this.ctx;
     c.save();
     c.translate(t.x, t.y);
-    c.fillStyle = farbe("--leder");
-    c.fill(p.kontur);
+    if (p.geometrie.geschlossen) {
+      c.fillStyle = farbe("--leder");
+      c.fill(p.kontur);
+    }
     c.lineWidth = (gewaehlt ? 2.5 : 1.25) * px;
     c.strokeStyle = gewaehlt ? farbe("--auswahl") : farbe("--kante");
     c.stroke(p.kontur);
