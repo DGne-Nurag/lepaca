@@ -1223,21 +1223,30 @@ pub fn starten() {
     }
 }
 
-/// Umgehung für WebKitGTK unter Wayland.
+/// Umgehung für WebKitGTK unter Wayland mit Nvidia-Treiber.
 ///
-/// Mit dem DMA-BUF-Renderer von WebKitGTK bricht die App auf manchen
-/// Wayland-Systemen sofort mit „Error 71 (Protokollfehler) dispatching to
-/// Wayland display“ ab. Abhilfe ist die Umgebungsvariable
-/// `WEBKIT_DISABLE_DMABUF_RENDERER=1`. Sie muss gesetzt sein, bevor GTK
-/// startet; `std::env::set_var` ist in Edition 2024 aber `unsafe` und damit
-/// bei uns verboten. Deshalb startet sich die App einmal selbst neu (per
-/// `exec`, ohne zweiten Prozess) mit der ergänzten Umgebung.
+/// Mit Nvidia und Explicit Sync bricht die App unter Wayland sofort mit
+/// „Error 71 (Protokollfehler) dispatching to Wayland display“ ab. Abhilfe
+/// ist `__NV_DISABLE_EXPLICIT_SYNC=1`.
 ///
-/// Wer die Variable selbst setzt (auch auf `0`), behält seinen Wert.
+/// Früher haben wir stattdessen `WEBKIT_DISABLE_DMABUF_RENDERER=1` gesetzt.
+/// Damit zeichnet WebKitGTK aber nach einem Wechsel auf einen Monitor mit
+/// anderer Skalierung (z. B. 100 % → 150 % → 100 %) das Fenster nicht mehr:
+/// Es bleibt leer bzw. zeigt, was dahinter liegt, bis man die Größe ändert.
+/// Der DMA-BUF-Renderer hat das Problem nicht, deshalb bleibt er an.
+///
+/// Die Variable muss gesetzt sein, bevor GTK startet; `std::env::set_var`
+/// ist in Edition 2024 aber `unsafe` und damit bei uns verboten. Deshalb
+/// startet sich die App einmal selbst neu (per `exec`, ohne zweiten
+/// Prozess) mit der ergänzten Umgebung.
+///
+/// Wer eine der beiden Variablen selbst setzt (auch auf `0`), behält seine
+/// Einstellung und es wird nichts ergänzt.
 #[cfg(target_os = "linux")]
 mod wayland {
     use std::ffi::OsString;
 
+    const NV_SYNC: &str = "__NV_DISABLE_EXPLICIT_SYNC";
     const DMABUF: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
     const SCHON_NEU_GESTARTET: &str = "LEPACA_UMGEBUNG_GESETZT";
 
@@ -1245,19 +1254,30 @@ mod wayland {
     /// kein Neustart nötig.
     pub(crate) fn fehlende_variablen(
         lesen: impl Fn(&str) -> Option<OsString>,
+        nvidia: bool,
     ) -> Vec<(&'static str, &'static str)> {
         let wayland = lesen("WAYLAND_DISPLAY").is_some_and(|w| !w.is_empty())
             || lesen("XDG_SESSION_TYPE").is_some_and(|t| t == "wayland");
-        if !wayland || lesen(SCHON_NEU_GESTARTET).is_some() || lesen(DMABUF).is_some() {
+        if !wayland
+            || !nvidia
+            || lesen(SCHON_NEU_GESTARTET).is_some()
+            || lesen(NV_SYNC).is_some()
+            || lesen(DMABUF).is_some()
+        {
             return Vec::new();
         }
-        vec![(DMABUF, "1"), (SCHON_NEU_GESTARTET, "1")]
+        vec![(NV_SYNC, "1"), (SCHON_NEU_GESTARTET, "1")]
+    }
+
+    /// Ist der proprietäre Nvidia-Treiber geladen?
+    fn nvidia_treiber() -> bool {
+        std::path::Path::new("/proc/driver/nvidia/version").exists()
     }
 
     pub(crate) fn umgebung_absichern() {
         use std::os::unix::process::CommandExt;
 
-        let fehlend = fehlende_variablen(|k| std::env::var_os(k));
+        let fehlend = fehlende_variablen(|k| std::env::var_os(k), nvidia_treiber());
         if fehlend.is_empty() {
             return;
         }
@@ -1269,7 +1289,7 @@ mod wayland {
             .envs(fehlend)
             .exec();
         // `exec` kehrt nur bei einem Fehler zurück; dann ohne Umgehung weiter.
-        eprintln!("lepaca: Neustart mit {DMABUF}=1 fehlgeschlagen: {fehler}");
+        eprintln!("lepaca: Neustart mit {NV_SYNC}=1 fehlgeschlagen: {fehler}");
     }
 }
 
@@ -1556,32 +1576,58 @@ mod tests {
         }
 
         #[test]
-        fn unter_wayland_wird_der_dmabuf_renderer_abgeschaltet() {
-            let v = fehlende_variablen(umgebung(&[("WAYLAND_DISPLAY", "wayland-0")]));
-            assert!(v.contains(&("WEBKIT_DISABLE_DMABUF_RENDERER", "1")));
+        fn unter_wayland_mit_nvidia_wird_explicit_sync_abgeschaltet() {
+            let v = fehlende_variablen(umgebung(&[("WAYLAND_DISPLAY", "wayland-0")]), true);
+            assert!(v.contains(&("__NV_DISABLE_EXPLICIT_SYNC", "1")));
+        }
+
+        #[test]
+        fn der_dmabuf_renderer_bleibt_an_sonst_bleibt_das_fenster_nach_monitorwechsel_leer() {
+            let v = fehlende_variablen(umgebung(&[("WAYLAND_DISPLAY", "wayland-0")]), true);
+            assert!(
+                v.iter()
+                    .all(|(k, _)| *k != "WEBKIT_DISABLE_DMABUF_RENDERER")
+            );
+        }
+
+        #[test]
+        fn ohne_nvidia_wird_nicht_neu_gestartet() {
+            let v = fehlende_variablen(umgebung(&[("WAYLAND_DISPLAY", "wayland-0")]), false);
+            assert!(v.is_empty());
         }
 
         #[test]
         fn unter_x11_bleibt_alles_wie_es_ist() {
-            let v = fehlende_variablen(umgebung(&[("DISPLAY", ":0"), ("XDG_SESSION_TYPE", "x11")]));
+            let v = fehlende_variablen(
+                umgebung(&[("DISPLAY", ":0"), ("XDG_SESSION_TYPE", "x11")]),
+                true,
+            );
             assert!(v.is_empty());
         }
 
         #[test]
         fn eigene_einstellung_des_nutzers_wird_respektiert() {
-            let v = fehlende_variablen(umgebung(&[
-                ("WAYLAND_DISPLAY", "wayland-0"),
-                ("WEBKIT_DISABLE_DMABUF_RENDERER", "0"),
-            ]));
-            assert!(v.is_empty());
+            for eigene in [
+                "__NV_DISABLE_EXPLICIT_SYNC",
+                "WEBKIT_DISABLE_DMABUF_RENDERER",
+            ] {
+                let v = fehlende_variablen(
+                    umgebung(&[("WAYLAND_DISPLAY", "wayland-0"), (eigene, "0")]),
+                    true,
+                );
+                assert!(v.is_empty(), "{eigene}");
+            }
         }
 
         #[test]
         fn nach_dem_neustart_startet_die_app_nicht_endlos_neu() {
-            let v = fehlende_variablen(umgebung(&[
-                ("XDG_SESSION_TYPE", "wayland"),
-                ("LEPACA_UMGEBUNG_GESETZT", "1"),
-            ]));
+            let v = fehlende_variablen(
+                umgebung(&[
+                    ("XDG_SESSION_TYPE", "wayland"),
+                    ("LEPACA_UMGEBUNG_GESETZT", "1"),
+                ]),
+                true,
+            );
             assert!(v.is_empty());
         }
     }
