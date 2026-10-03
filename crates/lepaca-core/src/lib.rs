@@ -8,5 +8,8 @@ pub mod form;
 pub mod geometrie;
 pub mod kachelung;
 pub mod mass;
+pub mod muster;
+pub mod skizze;
 pub mod stichlinie;
 pub mod versatz;
+pub mod vorlage;

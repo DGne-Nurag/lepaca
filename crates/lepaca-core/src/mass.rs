@@ -32,6 +32,9 @@ impl fmt::Display for MassFehler {
 impl std::error::Error for MassFehler {}
 
 impl Mm {
+    /// Die Länge null.
+    pub const NULL: Mm = Mm(0.0);
+
     /// Legt eine Länge an. NaN und unendliche Werte werden abgewiesen
     /// (Playbook 04: Zahlen sind immer endlich).
     pub fn neu(wert: f64) -> Result<Self, MassFehler> {

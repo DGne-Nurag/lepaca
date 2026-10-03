@@ -2,9 +2,35 @@
 // Gezeichnet wird alles in einem Canvas statt als einzelne SVG-Elemente,
 // damit die Leistung nicht an der Anzahl der Löcher hängt (ADR 0002).
 
-import { pfadeSofort, type Pfade } from "./kern";
-import type { Element, Muster, P, Teil } from "./modell";
-import { elementeZeichnen } from "./pfad";
+import { pfadeSofort, uebernommeneSofort, type Pfade } from "./kern";
+import { kantenzahl, pfadPunkte, punktzahl, type Element, type Muster, type P, type Teil } from "./modell";
+import { elementeZeichnen, kanteZeichnen } from "./pfad";
+
+/** Was außer den Teilen zu sehen ist. */
+export interface Darstellung {
+  /** Maße der Skizzen und Grundformen zeigen. */
+  masse: boolean;
+  /** Teile in ihrer Lage im Zusammenbau statt im Muster zeigen. */
+  zusammenbau: boolean;
+  /** Bemaßen: Hervorhebungen in der Skizze des gewählten Teils. */
+  skizze: SkizzenAnzeige | null;
+}
+
+export interface SkizzenAnzeige {
+  teil: number;
+  kanten: number[];
+  punkte: number[];
+  hoverKante: number | null;
+  hoverPunkt: number | null;
+  /** Je Kante, ob sie noch frei beweglich ist (vom Löser). */
+  freieKanten: boolean[] | null;
+}
+
+/** Wo ein Teil gezeichnet wird: im Muster oder im Zusammenbau. */
+export function lage(t: Teil, zusammenbau: boolean): P | null {
+  if (!zusammenbau) return [t.x, t.y];
+  return t.montage ? [t.montage.x, t.montage.y] : null;
+}
 
 /** Pfad, der gerade gezeichnet wird, mit dem Stück bis zur Maus. */
 export interface Entwurf {
@@ -68,14 +94,15 @@ export class Ansicht {
     this.versatzY = sy - my * neu;
   }
 
-  allesZeigen(muster: Muster): void {
+  allesZeigen(muster: Muster, zusammenbau = false): void {
     let min = [Infinity, Infinity];
     let max = [-Infinity, -Infinity];
     for (const t of muster.teile) {
       const p = pfadeSofort(t);
-      if (!p) continue;
-      min = [Math.min(min[0]!, t.x + p.min[0]), Math.min(min[1]!, t.y + p.min[1])];
-      max = [Math.max(max[0]!, t.x + p.max[0]), Math.max(max[1]!, t.y + p.max[1])];
+      const ort = lage(t, zusammenbau);
+      if (!p || !ort) continue;
+      min = [Math.min(min[0]!, ort[0] + p.min[0]), Math.min(min[1]!, ort[1] + p.min[1])];
+      max = [Math.max(max[0]!, ort[0] + p.max[0]), Math.max(max[1]!, ort[1] + p.max[1])];
     }
     if (!Number.isFinite(min[0]!)) {
       min = [0, 0];
@@ -89,7 +116,13 @@ export class Ansicht {
     this.versatzY = (this.hoehe - h * this.massstab) / 2 - min[1]! * this.massstab;
   }
 
-  zeichnen(muster: Muster, auswahl: number | null, vorschau: Vorschau | null, entwurf: Entwurf | null = null): void {
+  zeichnen(
+    muster: Muster,
+    auswahl: number | null,
+    vorschau: Vorschau | null,
+    entwurf: Entwurf | null = null,
+    darstellung: Darstellung = { masse: false, zusammenbau: false, skizze: null },
+  ): void {
     const c = this.ctx;
     const stil = getComputedStyle(this.canvas);
     const farbe = (n: string) => stil.getPropertyValue(n).trim() || "#000";
@@ -108,14 +141,28 @@ export class Ansicht {
     const [sichtX0, sichtY0] = this.zuMuster(0, 0);
     const [sichtX1, sichtY1] = this.zuMuster(this.breite, this.hoehe);
 
-    for (const t of muster.teile) {
+    // Im Zusammenbau in Nähreihenfolge und durchscheinend, damit alle
+    // Lagen zu sehen sind.
+    const teile = darstellung.zusammenbau
+      ? muster.teile.filter((t) => t.montage).sort((a, b) => a.montage!.schritt - b.montage!.schritt)
+      : muster.teile;
+    for (const t of teile) {
       const p = pfadeSofort(t);
-      if (!p) continue;
-      // Teile außerhalb der Sicht überspringen.
-      if (t.x + p.max[0] < sichtX0 || t.x + p.min[0] > sichtX1 || t.y + p.max[1] < sichtY0 || t.y + p.min[1] > sichtY1) {
+      const ort = lage(t, darstellung.zusammenbau);
+      if (!p || !ort) continue;
+      // Teile außerhalb der Sicht überspringen (Maße ragen etwas heraus).
+      const r = darstellung.masse ? 30 : 0;
+      if (ort[0] + p.max[0] + r < sichtX0 || ort[0] + p.min[0] - r > sichtX1 || ort[1] + p.max[1] + r < sichtY0 || ort[1] + p.min[1] - r > sichtY1) {
         continue;
       }
-      this.teil(t, p, t.id === auswahl, px, farbe);
+      const skizze = darstellung.skizze?.teil === t.id ? darstellung.skizze : null;
+      this.teil(t, ort, p, t.id === auswahl, px, farbe, darstellung.zusammenbau, skizze);
+    }
+    if (darstellung.masse && !darstellung.zusammenbau) {
+      for (const t of muster.teile) {
+        const p = pfadeSofort(t);
+        if (p) this.masse(t, p, t.id === auswahl, farbe);
+      }
     }
 
     if (entwurf) this.entwurf(entwurf, px, farbe);
@@ -200,30 +247,136 @@ export class Ansicht {
     c.restore();
   }
 
-  private teil(t: Teil, p: Pfade, gewaehlt: boolean, px: number, farbe: (n: string) => string): void {
+  private teil(
+    t: Teil,
+    ort: P,
+    p: Pfade,
+    gewaehlt: boolean,
+    px: number,
+    farbe: (n: string) => string,
+    durchscheinend: boolean,
+    skizze: SkizzenAnzeige | null,
+  ): void {
     const c = this.ctx;
     c.save();
-    c.translate(t.x, t.y);
+    c.translate(ort[0], ort[1]);
     if (p.geometrie.geschlossen) {
       c.fillStyle = farbe("--leder");
+      if (durchscheinend) c.globalAlpha = 0.45;
       c.fill(p.kontur);
+      c.globalAlpha = 1;
     }
     c.lineWidth = (gewaehlt ? 2.5 : 1.25) * px;
     c.strokeStyle = gewaehlt ? farbe("--auswahl") : farbe("--kante");
-    c.stroke(p.kontur);
+    const f = t.form;
+    if (skizze && f.art === "pfad") {
+      // Skizze: Kanten einzeln, freie in Blau, bestimmte dunkel.
+      const n = kantenzahl(f);
+      for (let k = 0; k < n; k++) {
+        const frei = skizze.freieKanten?.[k] ?? false;
+        const markiert = skizze.kanten.includes(k) || skizze.hoverKante === k;
+        c.beginPath();
+        kanteZeichnen(c, f, k);
+        c.lineWidth = (markiert ? 4 : 2) * px;
+        c.strokeStyle = markiert ? farbe("--markiert") : frei ? farbe("--frei") : farbe("--kante");
+        c.stroke();
+      }
+      // Der letzte Punkt eines geschlossenen Pfads ist oft der Start selbst.
+      const punkte = pfadPunkte(f).slice(0, punktzahl(f));
+      punkte.forEach((q, i) => {
+        const markiert = skizze.punkte.includes(i) || skizze.hoverPunkt === i;
+        const r = (markiert ? 5 : 3) * px;
+        c.fillStyle = markiert ? farbe("--markiert") : farbe("--flaeche");
+        c.strokeStyle = farbe("--kante");
+        c.lineWidth = 1 * px;
+        c.fillRect(q[0] - r, q[1] - r, 2 * r, 2 * r);
+        c.strokeRect(q[0] - r, q[1] - r, 2 * r, 2 * r);
+      });
+    } else {
+      c.stroke(p.kontur);
+    }
 
-    if (p.geometrie.linien.length > 0) {
-      const loch = t.naht ? t.naht.lochabstand * this.massstab : 0;
-      if (loch >= 4) {
+    const uebernommen = uebernommeneSofort(t);
+    const zuKlein = (t.naht ? t.naht.lochabstand : 3.85) * this.massstab < 4;
+    if (p.geometrie.linien.length > 0 || uebernommen) {
+      if (!zuKlein) {
         // Nah genug: jedes Loch zeichnen.
         c.fillStyle = farbe("--loch");
         c.fill(p.loecher);
+        if (uebernommen) c.fill(uebernommen.loecher);
       } else {
         // Weit weg: Detailstufe, nur die Nahtlinie.
         c.setLineDash([3 * px, 2 * px]);
         c.lineWidth = 1 * px;
         c.strokeStyle = farbe("--loch");
         c.stroke(p.linie);
+        if (uebernommen) {
+          c.fillStyle = farbe("--loch");
+          c.fill(uebernommen.loecher);
+        }
+      }
+    }
+    c.restore();
+  }
+
+  /** Maße und (beim gewählten Teil) Symbole der Bedingungen. Linien in mm,
+   * Schrift in festen Bildschirmpixeln. */
+  private masse(t: Teil, p: Pfade, gewaehlt: boolean, farbe: (n: string) => string): void {
+    const g = p.geometrie;
+    if (g.masse.length === 0 && (!gewaehlt || g.symbole.length === 0)) return;
+    const c = this.ctx;
+    const dpr = window.devicePixelRatio || 1;
+    const s = this.massstab;
+    const bild = (q: P): P => [(t.x + q[0]) * s + this.versatzX, (t.y + q[1]) * s + this.versatzY];
+    c.save();
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const linie = gewaehlt ? farbe("--mass-stark") : farbe("--mass");
+    c.strokeStyle = linie;
+    c.fillStyle = linie;
+    c.lineWidth = 1;
+    for (const m of g.masse) {
+      c.beginPath();
+      for (const [a, b] of m.striche) {
+        const [ax, ay] = bild(a);
+        const [bx, by] = bild(b);
+        c.moveTo(ax, ay);
+        c.lineTo(bx, by);
+      }
+      c.stroke();
+      for (const [spitze, r] of m.pfeile) {
+        const [x, y] = bild(spitze);
+        const l = 7;
+        c.beginPath();
+        c.moveTo(x, y);
+        c.lineTo(x - r[0] * l - r[1] * 2.5, y - r[1] * l + r[0] * 2.5);
+        c.lineTo(x - r[0] * l + r[1] * 2.5, y - r[1] * l - r[0] * 2.5);
+        c.closePath();
+        c.fill();
+      }
+    }
+    c.font = "12px system-ui, sans-serif";
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    for (const m of g.masse) {
+      const [x, y] = bild(m.textPos);
+      c.save();
+      c.translate(x, y);
+      c.rotate(m.textWinkel);
+      const b = c.measureText(m.text).width + 6;
+      c.fillStyle = farbe("--flaeche");
+      c.fillRect(-b / 2, -8, b, 16);
+      c.fillStyle = linie;
+      c.fillText(m.text, 0, 0);
+      c.restore();
+    }
+    if (gewaehlt) {
+      c.font = "bold 10px system-ui, sans-serif";
+      for (const sy of g.symbole) {
+        const [x, y] = bild(sy.pos);
+        c.fillStyle = farbe("--symbol");
+        c.fillRect(x - 7, y - 7, 14, 14);
+        c.fillStyle = farbe("--symbol-text");
+        c.fillText(sy.text, x, y + 0.5);
       }
     }
     c.restore();

@@ -281,6 +281,8 @@ fn ist_knick(ein: Option<Punkt>, aus: Option<Punkt>) -> bool {
 struct Abgeflacht {
     punkte: Vec<Punkt>,
     ecke: Vec<bool>,
+    /// Je Punkt das Element, das ihn erzeugt hat (der Start hat keins).
+    herkunft: Vec<Option<usize>>,
     erste_tangente: Option<Punkt>,
     letzte_tangente: Option<Punkt>,
 }
@@ -291,10 +293,11 @@ fn abflachen(p: &Pfad) -> Result<Abgeflacht, FormFehler> {
     }
     let mut punkte = vec![p.start];
     let mut ecke = vec![false];
+    let mut herkunft = vec![None];
     let mut letzte_tangente: Option<Punkt> = None;
     let mut erste_tangente: Option<Punkt> = None;
 
-    for el in &p.elemente {
+    for (nr, el) in p.elemente.iter().enumerate() {
         let von = punkte[punkte.len() - 1];
         let (t_start, t_ende, neue) = match *el {
             PfadElement::Linie(ziel) => (ziel.minus(von), ziel.minus(von), vec![ziel]),
@@ -324,43 +327,124 @@ fn abflachen(p: &Pfad) -> Result<Abgeflacht, FormFehler> {
             }
             punkte.push(q);
             ecke.push(false);
+            herkunft.push(Some(nr));
         }
         letzte_tangente = Some(t_ende);
     }
     Ok(Abgeflacht {
         punkte,
         ecke,
+        herkunft,
         erste_tangente,
         letzte_tangente,
     })
 }
 
 fn pfad(p: &Pfad) -> Result<Kontur, FormFehler> {
-    let Abgeflacht {
-        mut punkte,
-        mut ecke,
-        erste_tangente,
-        mut letzte_tangente,
-    } = abflachen(p)?;
+    Ok(p.kontur_mit_kanten()?.0)
+}
 
-    // Schließen: entweder endet der Pfad schon am Start, oder es kommt eine
-    // gerade Schlusslinie dazu.
-    let letzter = punkte[punkte.len() - 1];
-    if letzter.abstand(p.start) < 1e-9 {
-        punkte.pop();
-        ecke.pop();
-    } else {
-        let t_schluss = p.start.minus(letzter);
-        let j = ecke.len() - 1;
-        ecke[j] = ist_knick(letzte_tangente, Some(t_schluss));
-        letzte_tangente = Some(t_schluss);
+impl Pfad {
+    /// Anzahl der Kanten, an denen genäht werden kann: ein Element ist eine
+    /// Kante; ein geschlossener Pfad, der nicht am Start endet, hat dazu die
+    /// gerade Schlusslinie als letzte Kante.
+    pub fn kantenzahl(&self, geschlossen: bool) -> usize {
+        let n = self.elemente.len();
+        if geschlossen && self.hat_schlusslinie() {
+            n + 1
+        } else {
+            n
+        }
     }
-    ecke[0] = ist_knick(letzte_tangente, erste_tangente);
 
-    let kontur = Kontur::neu(punkte, ecke)?;
-    let (min, max) = kontur.grenzen();
-    pruefe_groesse((max.x - min.x).max(max.y - min.y))?;
-    Ok(kontur)
+    /// Endet der Pfad nicht am Start, sodass beim Schließen eine Linie
+    /// dazukommt?
+    pub fn hat_schlusslinie(&self) -> bool {
+        self.elemente
+            .last()
+            .is_none_or(|e| e.ziel().abstand(self.start) >= 1e-9)
+    }
+
+    /// Der geschlossene Pfad als Kontur, dazu je Konturkante (von Punkt `i`
+    /// zu Punkt `i + 1`) die Pfadkante, aus der sie stammt (siehe
+    /// [`Pfad::kantenzahl`]). Damit lässt sich die Naht je Pfadkante an-
+    /// und abschalten.
+    pub fn kontur_mit_kanten(&self) -> Result<(Kontur, Vec<usize>), FormFehler> {
+        let Abgeflacht {
+            punkte,
+            ecke,
+            herkunft,
+            erste_tangente,
+            mut letzte_tangente,
+        } = abflachen(self)?;
+        let schluss = self.elemente.len();
+
+        // Doppelte Punkte (Elemente der Länge null) zusammenfassen, bevor
+        // die Kontur es tut, damit die Zuordnung der Kanten stimmt.
+        let mut p2: Vec<Punkt> = Vec::with_capacity(punkte.len());
+        let mut e2: Vec<bool> = Vec::with_capacity(punkte.len());
+        let mut h2: Vec<Option<usize>> = Vec::with_capacity(punkte.len());
+        for ((q, e), h) in punkte.into_iter().zip(ecke).zip(herkunft) {
+            match p2.last() {
+                Some(letzter) if letzter.abstand(q) < 1e-9 => {
+                    let i = e2.len() - 1;
+                    e2[i] |= e;
+                }
+                _ => {
+                    p2.push(q);
+                    e2.push(e);
+                    h2.push(h);
+                }
+            }
+        }
+
+        // Schließen: entweder endet der Pfad schon am Start, oder es kommt
+        // eine gerade Schlusslinie dazu.
+        let letzter = p2[p2.len() - 1];
+        let letzte_kante = if p2.len() > 1 && letzter.abstand(self.start) < 1e-9 {
+            p2.pop();
+            let e = e2.pop().unwrap_or(false);
+            e2[0] |= e;
+            h2.pop().flatten().unwrap_or(schluss)
+        } else {
+            let t_schluss = self.start.minus(letzter);
+            let j = e2.len() - 1;
+            e2[j] = ist_knick(letzte_tangente, Some(t_schluss));
+            letzte_tangente = Some(t_schluss);
+            schluss
+        };
+        e2[0] = ist_knick(letzte_tangente, erste_tangente);
+
+        // Kante i läuft zu Punkt i + 1 und gehört zu dessen Element.
+        let n = p2.len();
+        let kanten: Vec<usize> = (0..n)
+            .map(|i| {
+                if i + 1 < n {
+                    h2[i + 1].unwrap_or(schluss)
+                } else {
+                    letzte_kante
+                }
+            })
+            .collect();
+
+        let kontur = Kontur::neu(p2, e2)?;
+        if kontur.len() != kanten.len() {
+            return Err(FormFehler::Kontur(KonturFehler::ZuWenigPunkte));
+        }
+        let (min, max) = kontur.grenzen();
+        pruefe_groesse((max.x - min.x).max(max.y - min.y))?;
+        Ok((kontur, kanten))
+    }
+}
+
+impl PfadElement {
+    /// Endpunkt des Elements.
+    pub fn ziel(&self) -> Punkt {
+        match *self {
+            PfadElement::Linie(z) => z,
+            PfadElement::Kurve { ziel, .. } | PfadElement::Bogen { ziel, .. } => ziel,
+        }
+    }
 }
 
 /// Eine offene Linie: Punkte und je Punkt, ob dort ein Knick ist. Anfang
@@ -420,29 +504,11 @@ fn bogen_flach(
     uhrzeigersinn: bool,
     gross: bool,
 ) -> Result<(Punkt, Punkt, Vec<Punkt>), FormFehler> {
-    let sehne = ziel.minus(von);
-    let d = sehne.laenge();
-    if d < 1e-6 || r < d / 2.0 - 1e-6 || !r.is_finite() {
-        return Err(FormFehler::BogenUnmoeglich);
-    }
-    let r = r.max(d / 2.0);
-    let h = (r * r - d * d / 4.0).max(0.0).sqrt();
-    let mitte = von.plus(sehne.mal(0.5));
-    let quer = Punkt::neu(-sehne.y / d, sehne.x / d);
-
-    // Winkel wachsen auf dem Bildschirm (y nach unten) im Uhrzeigersinn.
+    let zentrum = bogen_mitte(von, ziel, r, uhrzeigersinn, gross)?;
+    let r = r.max(ziel.minus(von).laenge() / 2.0);
     let richtung = if uhrzeigersinn { 1.0 } else { -1.0 };
-    let spanne = |c: Punkt| {
-        let w0 = (von.y - c.y).atan2(von.x - c.x);
-        let w1 = (ziel.y - c.y).atan2(ziel.x - c.x);
-        (w0, ((w1 - w0) * richtung).rem_euclid(TAU))
-    };
-    let mut zentrum = mitte.plus(quer.mal(h));
-    let (mut w0, mut s) = spanne(zentrum);
-    if (s > PI + 1e-9) != gross {
-        zentrum = mitte.minus(quer.mal(h));
-        (w0, s) = spanne(zentrum);
-    }
+    let w0 = (von.y - zentrum.y).atan2(von.x - zentrum.x);
+    let s = bogen_spanne(von, ziel, zentrum, uhrzeigersinn);
     let n = (s / bogen_schritt(r)).ceil().clamp(1.0, 10_000.0) as usize;
     let mut punkte: Vec<Punkt> = (1..n)
         .map(|i| {
@@ -454,6 +520,40 @@ fn bogen_flach(
     punkte.push(ziel);
     let tangente = |w: f64| Punkt::neu(-w.sin(), w.cos()).mal(richtung);
     Ok((tangente(w0), tangente(w0 + richtung * s), punkte))
+}
+
+/// Mittelpunkt eines Bogens von `von` nach `ziel` mit Radius `r`; die
+/// Flags wählen einen der vier möglichen Bögen wie bei SVG.
+pub(crate) fn bogen_mitte(
+    von: Punkt,
+    ziel: Punkt,
+    r: f64,
+    uhrzeigersinn: bool,
+    gross: bool,
+) -> Result<Punkt, FormFehler> {
+    let sehne = ziel.minus(von);
+    let d = sehne.laenge();
+    if d < 1e-6 || r < d / 2.0 - 1e-6 || !r.is_finite() {
+        return Err(FormFehler::BogenUnmoeglich);
+    }
+    let r = r.max(d / 2.0);
+    let h = (r * r - d * d / 4.0).max(0.0).sqrt();
+    let mitte = von.plus(sehne.mal(0.5));
+    let quer = Punkt::neu(-sehne.y / d, sehne.x / d);
+    let zentrum = mitte.plus(quer.mal(h));
+    if (bogen_spanne(von, ziel, zentrum, uhrzeigersinn) > PI + 1e-9) != gross {
+        return Ok(mitte.minus(quer.mal(h)));
+    }
+    Ok(zentrum)
+}
+
+/// Überstrichener Winkel (0 bis 2π) eines Bogens um `zentrum`. Winkel
+/// wachsen auf dem Bildschirm (y nach unten) im Uhrzeigersinn.
+pub(crate) fn bogen_spanne(von: Punkt, ziel: Punkt, zentrum: Punkt, uhrzeigersinn: bool) -> f64 {
+    let richtung = if uhrzeigersinn { 1.0 } else { -1.0 };
+    let w0 = (von.y - zentrum.y).atan2(von.x - zentrum.x);
+    let w1 = (ziel.y - zentrum.y).atan2(ziel.x - zentrum.x);
+    ((w1 - w0) * richtung).rem_euclid(TAU)
 }
 
 /// Teilt eine kubische Bézierkurve gleichmäßig auf. Die Schrittzahl folgt aus

@@ -10,6 +10,9 @@
     "core:event:default",
     "core:window:default",
     "allow-teil-geometrie",
+    "allow-skizze-loesen",
+    "allow-montage-loecher",
+    "allow-vorlage",
     "allow-pdf-exportieren"
   ]
 }

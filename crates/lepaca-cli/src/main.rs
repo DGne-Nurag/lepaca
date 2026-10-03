@@ -19,6 +19,9 @@ lepaca – Leather Pattern CAD
 Aufruf:
   lepaca svg [Optionen]   Teil als ein SVG in Originalgröße
   lepaca pdf [Optionen]   Teil als PDF, auf Blätter gekachelt, mit Prüfseite
+  lepaca vorlage bifold [--papier …] [--rand …] [--klebekante …] --ausgabe <datei.pdf>
+                          Fertiges Muster einer Bifold-Geldbörse als PDF,
+                          mit Maßen und passenden Löchern in allen Teilen
 
 Optionen (alle Maße in Millimetern):
   --form rechteck|kreis|ellipse|tpocket
@@ -88,6 +91,10 @@ fn ausfuehren(args: &[String]) -> Result<String, String> {
         Some("--version") => Ok(format!("lepaca {}", env!("CARGO_PKG_VERSION"))),
         Some("svg") => erzeugen(lies_optionen(&args[1..])?, Format::Svg),
         Some("pdf") => erzeugen(lies_optionen(&args[1..])?, Format::Pdf),
+        Some("vorlage") => match args.get(1).map(String::as_str) {
+            Some("bifold") => vorlage_bifold(lies_optionen(&args[2..])?),
+            _ => Err("Bekannte Vorlagen: bifold".into()),
+        },
         _ => Ok(HILFE.into()),
     }
 }
@@ -131,6 +138,59 @@ fn lies_optionen(args: &[String]) -> Result<Optionen, String> {
         }
     }
     Ok(o)
+}
+
+fn kachel_einstellung(o: &Optionen) -> Result<KachelEinstellung, String> {
+    let papier = match o.papier.as_deref().unwrap_or("a4") {
+        "a4" => Papier::A4,
+        "a3" => Papier::A3,
+        "letter" => Papier::LETTER,
+        p => {
+            return Err(format!(
+                "Unbekanntes Papierformat „{p}“. Möglich: a4, a3, letter."
+            ));
+        }
+    };
+    Ok(KachelEinstellung {
+        papier,
+        rand: mm("rand", Some(o.rand.unwrap_or(10.0)))?,
+        klebekante: mm("klebekante", Some(o.klebekante.unwrap_or(10.0)))?,
+    })
+}
+
+fn speichern(ausgabe: &std::path::Path, inhalt: &[u8], ueberschreiben: bool) -> Result<(), String> {
+    lepaca_io::datei::atomar_schreiben(ausgabe, inhalt, ueberschreiben).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!(
+                "{} gibt es schon. Mit --ueberschreiben ersetzen.",
+                ausgabe.display()
+            )
+        } else {
+            format!("{} konnte nicht gespeichert werden: {e}", ausgabe.display())
+        }
+    })
+}
+
+/// Die Bifold-Vorlage als PDF mit Nähanleitung auf der Konsole.
+fn vorlage_bifold(o: Optionen) -> Result<String, String> {
+    let ausgabe = o
+        .ausgabe
+        .clone()
+        .ok_or("Bitte --ausgabe <datei.pdf> angeben.")?;
+    let v = lepaca_core::vorlage::bifold().map_err(|e| format!("Vorlage fehlerhaft: {e:?}"))?;
+    let (pdf, blaetter) = lepaca_io::pdf::muster_pdf(&v.teile, kachel_einstellung(&o)?)
+        .map_err(|e| format!("Kein PDF möglich: {e:?}"))?;
+    speichern(&ausgabe, &pdf, o.ueberschreiben)?;
+    let mut meldung = format!(
+        "Bifold-Geldbörse, {} Teile, {blaetter} Blätter plus Prüfseite, gespeichert in {}\n",
+        v.teile.len(),
+        ausgabe.display()
+    );
+    for s in &v.schritte {
+        meldung.push_str("\n- ");
+        meldung.push_str(s);
+    }
+    Ok(meldung)
 }
 
 fn mm(name: &str, x: Option<f64>) -> Result<Mm, String> {
@@ -196,7 +256,10 @@ fn erzeugen(o: Optionen, format: Format) -> Result<String, String> {
         lochabstand: mm("lochabstand", Some(o.lochabstand.unwrap_or(3.85)))?,
         ecke,
     };
-    let ausgabe = o.ausgabe.ok_or("Bitte --ausgabe <datei.svg> angeben.")?;
+    let ausgabe = o
+        .ausgabe
+        .clone()
+        .ok_or("Bitte --ausgabe <datei.svg> angeben.")?;
 
     let kontur = form
         .kontur()
@@ -213,21 +276,7 @@ fn erzeugen(o: Optionen, format: Format) -> Result<String, String> {
     let inhalt = match format {
         Format::Svg => lepaca_io::svg::teil(&kontur, &reihe, &lochform).into_bytes(),
         Format::Pdf => {
-            let papier = match o.papier.as_deref().unwrap_or("a4") {
-                "a4" => Papier::A4,
-                "a3" => Papier::A3,
-                "letter" => Papier::LETTER,
-                p => {
-                    return Err(format!(
-                        "Unbekanntes Papierformat „{p}“. Möglich: a4, a3, letter."
-                    ));
-                }
-            };
-            let kachel_einstellung = KachelEinstellung {
-                papier,
-                rand: mm("rand", Some(o.rand.unwrap_or(10.0)))?,
-                klebekante: mm("klebekante", Some(o.klebekante.unwrap_or(10.0)))?,
-            };
+            let kachel_einstellung = kachel_einstellung(&o)?;
             let (von, bis) = kontur.grenzen();
             let plan = kacheln(von, bis, kachel_einstellung)
                 .map_err(|e| format!("Keine Aufteilung auf Blätter möglich: {e:?}"))?;
@@ -245,16 +294,7 @@ fn erzeugen(o: Optionen, format: Format) -> Result<String, String> {
             lepaca_io::pdf::teil_gekachelt(&kontur, &reihe, &lochform, &plan)
         }
     };
-    lepaca_io::datei::atomar_schreiben(&ausgabe, &inhalt, o.ueberschreiben).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            format!(
-                "{} gibt es schon. Mit --ueberschreiben ersetzen.",
-                ausgabe.display()
-            )
-        } else {
-            format!("{} konnte nicht gespeichert werden: {e}", ausgabe.display())
-        }
-    })?;
+    speichern(&ausgabe, &inhalt, o.ueberschreiben)?;
 
     let mut meldung = format!(
         "{} Stichlöcher, gespeichert in {}{blaetter}",

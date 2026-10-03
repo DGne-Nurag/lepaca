@@ -12,6 +12,28 @@ export type Element =
   | { art: "kurve"; k1: P; k2: P; ziel: P }
   | { art: "bogen"; ziel: P; radius: number; uhrzeigersinn: boolean; gross: boolean };
 
+/** Maß oder Bedingung einer Skizze. Punkt 0 ist der Start, Punkt i + 1 das
+ * Ziel von Element i; Kante i ist Element i, bei geschlossenem Pfad ohne
+ * Rückweg zum Start ist Kante n die Schlusslinie. */
+export type Bedingung =
+  | { art: "laenge"; kante: number; wert: number }
+  | { art: "abstand"; a: number; b: number; wert: number }
+  | { art: "abstandX"; a: number; b: number; wert: number }
+  | { art: "abstandY"; a: number; b: number; wert: number }
+  | { art: "radius"; kante: number; wert: number }
+  | { art: "winkel"; a: number; b: number; grad: number }
+  | { art: "horizontal"; kante: number }
+  | { art: "vertikal"; kante: number }
+  | { art: "parallel"; a: number; b: number }
+  | { art: "senkrecht"; a: number; b: number }
+  | { art: "gleich"; a: number; b: number }
+  | { art: "tangential"; a: number; b: number }
+  | { art: "fest"; punkt: number; x: number; y: number };
+
+/** Bedingungen mit Zahlenwert (Maße). */
+export type Mass = Extract<Bedingung, { wert: number } | { grad: number }>;
+export const istMass = (b: Bedingung): b is Mass => "wert" in b || "grad" in b;
+
 export type Form =
   | { art: "rechteck"; breite: number; hoehe: number; eckenradius: number }
   | { art: "kreis"; durchmesser: number }
@@ -26,7 +48,24 @@ export type Form =
       nahtSteg: boolean;
       nahtOeffnung: boolean;
     }
-  | { art: "pfad"; start: P; elemente: Element[]; geschlossen: boolean };
+  | {
+      art: "pfad";
+      start: P;
+      elemente: Element[];
+      geschlossen: boolean;
+      bedingungen: Bedingung[];
+      /** Je Kante, ob dort genäht wird; fehlt: ringsum. */
+      naehte?: boolean[];
+    };
+
+export type PfadForm = Extract<Form, { art: "pfad" }>;
+
+/** Lage im fertigen Stück und Nähschritt. */
+export interface Montage {
+  x: number;
+  y: number;
+  schritt: number;
+}
 
 export interface Naht {
   kantenabstand: number;
@@ -43,6 +82,9 @@ export interface Teil {
   x: number;
   y: number;
   naht: Naht | null;
+  /** Lage im Zusammenbau; Nähte gehen durch alle Lagen, die beim Nähen
+   * schon da sind. */
+  montage?: Montage | null;
 }
 
 export interface Druck {
@@ -56,6 +98,8 @@ export interface Muster {
   druck: Druck;
   /** Nahteinstellung für neue Teile: die zuletzt benutzte. */
   standardNaht: Naht;
+  /** Nähanleitung, z. B. aus einer Vorlage. */
+  anleitung?: string[];
 }
 
 export function neuesMuster(): Muster {
@@ -93,6 +137,37 @@ export function ausdehnung(f: Form): { breite: number; hoehe: number } {
     default:
       return { breite: f.breite, hoehe: f.hoehe };
   }
+}
+
+/** Punkte eines Pfads: Start und das Ziel jedes Elements. */
+export function pfadPunkte(f: PfadForm): P[] {
+  return [f.start, ...f.elemente.map((e) => e.ziel)];
+}
+
+/** Endet der Pfad nicht am Start, kommt beim Schließen eine Linie dazu. */
+export function hatSchlusslinie(f: PfadForm): boolean {
+  const z = f.elemente.at(-1)?.ziel;
+  return !z || Math.hypot(z[0] - f.start[0], z[1] - f.start[1]) >= 1e-9;
+}
+
+export function kantenzahl(f: PfadForm): number {
+  return f.elemente.length + (f.geschlossen && hatSchlusslinie(f) ? 1 : 0);
+}
+
+/** Kante k als Punktindizes und Art; die Schlusslinie ist eine Linie. */
+export function kante(f: PfadForm, k: number): { von: number; bis: number; element: Element } {
+  const n = f.elemente.length;
+  if (k < n) {
+    const amStart = f.geschlossen && k === n - 1 && !hatSchlusslinie(f);
+    return { von: k, bis: amStart ? 0 : k + 1, element: f.elemente[k]! };
+  }
+  return { von: n, bis: 0, element: { art: "linie", ziel: f.start } };
+}
+
+/** Zahl der Punkte, die eine Bedingung nennen darf (der letzte Punkt eines
+ * geschlossenen Pfads, der am Start endet, ist der Start selbst). */
+export function punktzahl(f: PfadForm): number {
+  return f.elemente.length + 1 - (f.geschlossen && !hatSchlusslinie(f) ? 1 : 0);
 }
 
 const MAX_SCHRITTE = 200;
