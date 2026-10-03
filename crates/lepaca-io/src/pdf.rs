@@ -9,8 +9,11 @@
 use std::fmt::Write;
 
 use lepaca_core::eisen::Lochform;
+use lepaca_core::form::Form;
 use lepaca_core::geometrie::{Kontur, Punkt};
-use lepaca_core::kachelung::{self, Kachel, Kachelplan};
+use lepaca_core::kachelung::{self, Kachel, KachelFehler, Kachelplan};
+use lepaca_core::muster::{self, Musterteil, StichOderForm, Teil, TeilForm, UebernommenesLoch};
+use lepaca_core::skizze::{self, Masslinie};
 use lepaca_core::stichlinie::Stichreihe;
 
 const PT_PRO_MM: f64 = 72.0 / 25.4;
@@ -23,6 +26,32 @@ pub struct Druckteil<'a> {
     pub umriss: &'a [Punkt],
     pub geschlossen: bool,
     pub stiche: Option<(&'a Stichreihe, &'a Lochform)>,
+    /// Name, wird in die Mitte des Teils gedruckt.
+    pub name: Option<&'a str>,
+    /// Löcher aus Nähten anderer Teile, die durch dieses Teil gehen.
+    pub uebernommen: &'a [UebernommenesLoch],
+    /// Maße der Skizze, relativ zu `bezug`.
+    pub masse: &'a [Masslinie],
+    pub bezug: Punkt,
+}
+
+impl<'a> Druckteil<'a> {
+    /// Ein Teil ohne Namen, übernommene Löcher und Maße.
+    pub fn einfach(
+        umriss: &'a [Punkt],
+        geschlossen: bool,
+        stiche: Option<(&'a Stichreihe, &'a Lochform)>,
+    ) -> Self {
+        Druckteil {
+            umriss,
+            geschlossen,
+            stiche,
+            name: None,
+            uebernommen: &[],
+            masse: &[],
+            bezug: Punkt::neu(0.0, 0.0),
+        }
+    }
 }
 
 /// Erzeugt das komplette PDF für ein einzelnes Teil.
@@ -33,13 +62,90 @@ pub fn teil_gekachelt(
     plan: &Kachelplan,
 ) -> Vec<u8> {
     muster_gekachelt(
-        &[Druckteil {
-            umriss: kontur.punkte(),
-            geschlossen: true,
-            stiche: Some((stiche, loch)),
-        }],
+        &[Druckteil::einfach(
+            kontur.punkte(),
+            true,
+            Some((stiche, loch)),
+        )],
         plan,
     )
+}
+
+/// Warum ein Muster nicht gedruckt werden kann.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MusterFehler {
+    Leer,
+    ZuVieleTeile,
+    /// Teil mit diesem Index lässt sich nicht bauen.
+    Teil(usize, StichOderForm),
+    Kachel(KachelFehler),
+}
+
+/// Druckt ein ganzes Muster: jedes Teil mit Namen, eigener Naht, den
+/// Löchern aus Nähten anderer Teile (Zusammenbau) und den Maßen seiner
+/// Skizze. Liefert das PDF und die Zahl der Blätter.
+pub fn muster_pdf(
+    teile: &[Musterteil],
+    einstellung: kachelung::Einstellung,
+) -> Result<(Vec<u8>, usize), MusterFehler> {
+    if teile.is_empty() {
+        return Err(MusterFehler::Leer);
+    }
+    if teile.len() > muster::MAX_TEILE {
+        return Err(MusterFehler::ZuVieleTeile);
+    }
+    let roh: Vec<Teil> = teile.iter().map(|t| t.teil.clone()).collect();
+    let berechnet = muster::berechnen(&roh);
+    let mut fertig = Vec::with_capacity(teile.len());
+    for (i, b) in berechnet.iter().enumerate() {
+        let b = b.as_ref().map_err(|f| MusterFehler::Teil(i, *f))?;
+        if let Some(Err(f)) = &b.stiche {
+            return Err(MusterFehler::Teil(i, StichOderForm::Stich(*f)));
+        }
+        fertig.push(b);
+    }
+    let durch = muster::durchstechen_berechnet(&roh, &berechnet);
+    let masse: Vec<Vec<Masslinie>> = teile
+        .iter()
+        .map(|t| match &t.teil.form {
+            TeilForm::Geschlossen(Form::Pfad(p)) => skizze::zeichnung(p, true, &t.bedingungen).0,
+            TeilForm::Offen(p) => skizze::zeichnung(p, false, &t.bedingungen).0,
+            TeilForm::Geschlossen(f) => skizze::form_masse(f),
+        })
+        .collect();
+
+    let mut von = Punkt::neu(f64::INFINITY, f64::INFINITY);
+    let mut bis = Punkt::neu(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for q in fertig.iter().flat_map(|b| b.umriss.punkte()) {
+        von = Punkt::neu(von.x.min(q.x), von.y.min(q.y));
+        bis = Punkt::neu(bis.x.max(q.x), bis.y.max(q.y));
+    }
+    // Platz für Maße außen herum.
+    if masse.iter().any(|m| !m.is_empty()) {
+        von = von.minus(Punkt::neu(20.0, 20.0));
+        bis = bis.plus(Punkt::neu(20.0, 20.0));
+    }
+    let plan = kachelung::kacheln(von, bis, einstellung).map_err(MusterFehler::Kachel)?;
+    let druckteile: Vec<Druckteil<'_>> = teile
+        .iter()
+        .zip(&fertig)
+        .zip(&durch)
+        .zip(&masse)
+        .map(|(((t, b), d), m)| Druckteil {
+            umriss: b.umriss.punkte(),
+            geschlossen: b.umriss.geschlossen(),
+            stiche: b
+                .stiche
+                .as_ref()
+                .and_then(|s| s.as_ref().ok())
+                .map(|(r, l)| (r, l)),
+            name: Some(t.name.as_str()),
+            uebernommen: &d.loecher,
+            masse: m,
+            bezug: t.teil.position,
+        })
+        .collect();
+    Ok((muster_gekachelt(&druckteile, &plan), plan.kacheln.len()))
 }
 
 /// Erzeugt das komplette PDF für ein Muster aus mehreren Teilen: ein Blatt
@@ -104,17 +210,30 @@ fn kachelseite(
                 let _ = writeln!(s, "{}", if linie.geschlossen { "h S" } else { "S" });
             }
             let _ = writeln!(s, "[] 0 d 0 g");
-            let halb = loch.laenge.max(loch.breite);
             for l in &stiche.loecher {
-                let m = l.mitte;
-                if !sichtbar(
-                    Punkt::neu(m.x - halb, m.y - halb),
-                    Punkt::neu(m.x + halb, m.y + halb),
-                ) {
-                    continue;
-                }
-                pfad(&mut s, &loch.umriss(l));
-                let _ = writeln!(s, "f");
+                loch_zeichnen(&mut s, l, loch, &sichtbar);
+            }
+        }
+        let _ = writeln!(s, "0 g");
+        for u in teil.uebernommen {
+            loch_zeichnen(&mut s, &u.loch, &u.form, &sichtbar);
+        }
+        masse_zeichnen(&mut s, teil.masse, teil.bezug);
+        if let Some(name) = teil.name {
+            let m = von.plus(bis).mal(0.5);
+            if teil.geschlossen {
+                let breite = name.chars().count() as f64 * 1.9;
+                text(&mut s, m.x - breite / 2.0, m.y + 1.5, 10.0, name);
+            } else {
+                // Linien klein über ihrem Anfang beschriften.
+                let breite = name.chars().count() as f64 * 1.3;
+                text(
+                    &mut s,
+                    teil.umriss[0].x - breite / 2.0,
+                    teil.umriss[0].y - 2.5,
+                    7.0,
+                    name,
+                );
             }
         }
     }
@@ -229,6 +348,59 @@ fn pruefseite(plan: &Kachelplan, gesamt: usize) -> String {
     s
 }
 
+fn loch_zeichnen(
+    s: &mut String,
+    l: &lepaca_core::stichlinie::Stichloch,
+    loch: &Lochform,
+    sichtbar: &impl Fn(Punkt, Punkt) -> bool,
+) {
+    let halb = loch.laenge.max(loch.breite);
+    let m = l.mitte;
+    if !sichtbar(
+        Punkt::neu(m.x - halb, m.y - halb),
+        Punkt::neu(m.x + halb, m.y + halb),
+    ) {
+        return;
+    }
+    pfad(s, &loch.umriss(l));
+    let _ = writeln!(s, "f");
+}
+
+/// Maße in Grau: dünne Linien, kleine Pfeile, Maßzahl.
+fn masse_zeichnen(s: &mut String, masse: &[Masslinie], bezug: Punkt) {
+    if masse.is_empty() {
+        return;
+    }
+    let _ = writeln!(s, "0.45 G 0.45 g 0.12 w");
+    for m in masse {
+        for (a, b) in &m.striche {
+            let (a, b) = (a.plus(bezug), b.plus(bezug));
+            let _ = writeln!(s, "{} {} m {} {} l S", z(a.x), z(a.y), z(b.x), z(b.y));
+        }
+        for (spitze, r) in &m.pfeile {
+            let q = spitze.plus(bezug);
+            let quer = Punkt::neu(-r.y, r.x);
+            let hinten = q.minus(r.mal(2.0));
+            pfad(
+                s,
+                &[q, hinten.plus(quer.mal(0.5)), hinten.minus(quer.mal(0.5))],
+            );
+            let _ = writeln!(s, "f");
+        }
+    }
+    for m in masse {
+        let q = m.text_pos.plus(bezug);
+        // Ungefähre Breite von Helvetica bei 7 pt: 1,3 mm je Zeichen.
+        let halb = m.text.chars().count() as f64 * 1.3 / 2.0;
+        let (sin, cos) = m.text_winkel.sin_cos();
+        // Vom Mittelpunkt zum Anfang der Grundlinie: halbe Breite zurück,
+        // etwas nach unten (quer zur Schrift).
+        let start = Punkt::neu(q.x - cos * halb - sin, q.y - sin * halb + cos);
+        text_farbig(s, start.x, start.y, 7.0, m.text_winkel, &m.text, "0.45 g");
+    }
+    let _ = writeln!(s, "0 G 0 g");
+}
+
 fn mm_koordinaten(s: &mut String, blatt_hoehe: f64) {
     let f = z(PT_PRO_MM);
     let _ = writeln!(s, "{f} 0 0 -{f} 0 {} cm", z(blatt_hoehe * PT_PRO_MM));
@@ -282,10 +454,27 @@ fn passkreuz(s: &mut String, x: f64, y: f64) {
 /// Text an (x, y) in mm, Schriftgröße in pt. Die Textmatrix dreht die
 /// y-Spiegelung der Seite für die Schrift wieder um.
 fn text(s: &mut String, x: f64, y: f64, groesse_pt: f64, inhalt: &str) {
-    let g = z(groesse_pt / PT_PRO_MM);
+    text_farbig(s, x, y, groesse_pt, 0.0, inhalt, "0 g");
+}
+
+fn text_farbig(
+    s: &mut String,
+    x: f64,
+    y: f64,
+    groesse_pt: f64,
+    winkel: f64,
+    inhalt: &str,
+    farbe: &str,
+) {
+    let g = groesse_pt / PT_PRO_MM;
+    let (sin, cos) = winkel.sin_cos();
     let _ = writeln!(
         s,
-        "0 g BT /F1 1 Tf {g} 0 0 -{g} {} {} Tm ({}) Tj ET",
+        "{farbe} BT /F1 1 Tf {} {} {} {} {} {} Tm ({}) Tj ET",
+        z(g * cos),
+        z(g * sin),
+        z(g * sin),
+        z(-g * cos),
         z(x),
         z(y),
         pdf_text(inhalt)
@@ -493,14 +682,24 @@ mod tests {
             KachelEinstellung::default(),
         )
         .unwrap();
-        let teil = Druckteil {
-            umriss: &linie,
-            geschlossen: false,
-            stiche: None,
-        };
+        let teil = Druckteil::einfach(&linie, false, None);
         let t = als_text(&muster_gekachelt(&[teil], &plan));
         // Die Linie endet mit „S“ (nur zeichnen), nicht mit „h S“ (schließen).
         assert!(t.contains("50 20 l\nS\n"));
         assert!(!t.contains("50 20 l\nh"));
+    }
+
+    #[test]
+    fn die_bifold_vorlage_wird_ein_pdf_mit_namen_und_massen() {
+        let v = lepaca_core::vorlage::bifold().unwrap();
+        let (pdf, blaetter) = muster_pdf(&v.teile, KachelEinstellung::default()).unwrap();
+        let t = als_text(&pdf);
+        assert!(blaetter >= 2);
+        assert!(t.contains("(Au\\337enleder) Tj"));
+        assert!(t.contains("(Vorderfach links) Tj"));
+        // Breite und Höhe des Außenleders stehen als Maß im PDF.
+        assert!(t.contains("(217) Tj"));
+        assert!(t.contains("(93) Tj"));
+        assert!(t.contains("(R 6) Tj"));
     }
 }
