@@ -1,24 +1,42 @@
 // lepaca – Pattern Viewer mit erster Werkzeugleiste.
 
-import { Ansicht, PX_PRO_MM, type Entwurf, type Vorschau } from "./ansicht";
-import { enthaelt, formFehler, pdfExportieren, pfadeFuer, pfadeSofort } from "./kern";
+import { Ansicht, lage, PX_PRO_MM, type Darstellung, type Entwurf, type Vorschau } from "./ansicht";
 import {
+  enthaelt,
+  formFehler,
+  montageAktualisieren,
+  pdfExportieren,
+  pfadeFuer,
+  pfadeSofort,
+  skizzeLoesen,
+  skizzeSofort,
+  uebernommeneSofort,
+  vorlageLaden,
+} from "./kern";
+import {
+  istMass,
+  kante,
+  kantenzahl,
   neueId,
+  pfadPunkte,
+  punktzahl,
   neuesMuster,
   neueTPocket,
   Verlauf,
   type Ecke,
   type Eisen,
+  type Bedingung,
   type Element as Stueck,
   type Form,
   type Muster,
   type P,
+  type PfadForm,
   type Teil,
 } from "./modell";
-import { abstandZuLinie, auf45Grad, bogenAusWoelbung } from "./pfad";
+import { abstandZuLinie, auf45Grad, bogenAusWoelbung, kantenLaenge, kantePunkte } from "./pfad";
 import { fehlertext, leseZahl, t, zahl, type TextSchluessel } from "./texte";
 
-type Werkzeug = "auswahl" | "hand" | "rechteck" | "kreis" | "ellipse" | "tpocket" | Stift;
+type Werkzeug = "auswahl" | "hand" | "bemassen" | "rechteck" | "kreis" | "ellipse" | "tpocket" | Stift;
 /** Werkzeuge, die Stück für Stück einen Pfad zeichnen. */
 type Stift = "linie" | "bogen" | "bezier";
 const istStift = (w: Werkzeug): w is Stift => w === "linie" || w === "bogen" || w === "bezier";
@@ -26,6 +44,7 @@ const istStift = (w: Werkzeug): w is Stift => w === "linie" || w === "bogen" || 
 const WERKZEUGE: { id: Werkzeug; taste: string; icon: string }[] = [
   { id: "auswahl", taste: "V", icon: '<path d="M6 3l12 9-5 1.2 3 6-2.2 1-3-6L6 18z"/>' },
   { id: "hand", taste: "H", icon: '<path d="M8 11V5.5a1.5 1.5 0 013 0V10m0-5a1.5 1.5 0 013 0V10m0-3.5a1.5 1.5 0 013 0V14a6 6 0 01-6 6h-1a6 6 0 01-5-2.7L4.5 14a1.5 1.5 0 012.5-1.6L8 14"/>' },
+  { id: "bemassen", taste: "D", icon: '<path d="M4 7v10M20 7v10M4 12h16"/><path d="M8 9.5L4.5 12 8 14.5M16 9.5l3.5 2.5-3.5 2.5"/>' },
   { id: "rechteck", taste: "R", icon: '<rect x="4" y="6" width="16" height="12" rx="1.5"/>' },
   { id: "kreis", taste: "K", icon: '<circle cx="12" cy="12" r="8"/>' },
   { id: "ellipse", taste: "E", icon: '<ellipse cx="12" cy="12" rx="9" ry="6"/>' },
@@ -58,6 +77,21 @@ interface PfadEntwurf {
 let pfadEntwurf: PfadEntwurf | null = null;
 
 let zeichnenGeplant = false;
+
+/** Maße auf der Fläche zeigen. */
+let zeigeMasse = true;
+/** Teile in ihrer Lage im fertigen Stück zeigen statt im Muster. */
+let zusammenbau = false;
+
+/** Bemaßen: gewählte Punkte und Kanten im Pfad des gewählten Teils. */
+interface SkizzenWahl {
+  kanten: number[];
+  punkte: number[];
+}
+let skizzenWahl: SkizzenWahl = { kanten: [], punkte: [] };
+let skizzenHover: { kante: number | null; punkt: number | null } = { kante: null, punkt: null };
+/** Maß, dessen Feld nach dem Neuaufbau den Fokus bekommt. */
+let fokusBedingung: number | null = null;
 
 const muster = (): Muster => verlauf.muster;
 const gewaehlt = (): Teil | undefined => muster().teile.find((x) => x.id === auswahl);
@@ -101,6 +135,9 @@ for (const w of WERKZEUGE) {
 const knopfZurueck = el("button", { type: "button", title: `${t("rueckgaengig")} (Strg+Z)`, "aria-keyshortcuts": "Control+Z" }, t("rueckgaengig"));
 const knopfVor = el("button", { type: "button", title: `${t("wiederholen")} (Strg+Umschalt+Z)`, "aria-keyshortcuts": "Control+Shift+Z" }, t("wiederholen"));
 const knopfAlles = el("button", { type: "button", title: `${t("alles.zeigen")} (0)`, "aria-keyshortcuts": "0" }, t("alles.zeigen"));
+const knopfVorlage = el("button", { type: "button", title: t("vorlage.bifold.titel") }, t("vorlage.bifold"));
+const knopfMasse = el("button", { type: "button", "aria-pressed": "true", title: `${t("ansicht.masse.titel")} (M)`, "aria-keyshortcuts": "M" }, t("ansicht.masse"));
+const knopfZusammenbau = el("button", { type: "button", "aria-pressed": "false", title: `${t("ansicht.zusammenbau.titel")} (Z)`, "aria-keyshortcuts": "Z" }, t("ansicht.zusammenbau"));
 const knopfExport = el("button", { type: "button", class: "primaer", title: `${t("export")} (Strg+P)`, "aria-keyshortcuts": "Control+P" }, t("export"));
 const kopf = el(
   "header",
@@ -110,6 +147,10 @@ const kopf = el(
   knopfVor,
   el("span", { class: "trenner" }),
   knopfAlles,
+  knopfMasse,
+  knopfZusammenbau,
+  el("span", { class: "trenner" }),
+  knopfVorlage,
   el("span", { class: "fueller" }),
   knopfExport,
 );
@@ -145,9 +186,54 @@ function neuZeichnen(): void {
   zeichnenGeplant = true;
   requestAnimationFrame(() => {
     zeichnenGeplant = false;
-    ansicht.zeichnen(muster(), auswahl, vorschau, entwurfFuerAnsicht());
+    ansicht.zeichnen(muster(), auswahl, vorschau, entwurfFuerAnsicht(), darstellung());
     statusZoom.textContent = t("status.zoom", { z: Math.round((ansicht.massstab / PX_PRO_MM) * 100) });
   });
+}
+
+function darstellung(): Darstellung {
+  const g = gewaehlt();
+  const f = g?.form;
+  const skizze =
+    werkzeug === "bemassen" && g && f?.art === "pfad" && !zusammenbau
+      ? {
+          teil: g.id,
+          kanten: skizzenWahl.kanten,
+          punkte: skizzenWahl.punkte,
+          hoverKante: skizzenHover.kante,
+          hoverPunkt: skizzenHover.punkt,
+          freieKanten: skizzeSofort(f)?.freieKanten ?? null,
+        }
+      : null;
+  return { masse: zeigeMasse, zusammenbau, skizze };
+}
+
+/** Skizzen, die der Kern nicht lösen konnte; nicht immer wieder fragen. */
+const skizzeUnloesbar = new Set<string>();
+
+/** Zustand der Skizze des gewählten Teils (Freiheitsgrade) nachladen. */
+function skizzeLaden(): void {
+  const f = gewaehlt()?.form;
+  if (f?.art !== "pfad" || skizzeSofort(f)) return;
+  const s = JSON.stringify(f);
+  if (skizzeUnloesbar.has(s)) return;
+  skizzeLoesen(f)
+    .then(() => {
+      neuZeichnen();
+      eigenschaftenAktualisieren();
+    })
+    .catch(() => skizzeUnloesbar.add(s));
+}
+
+/** Löcher aus dem Zusammenbau nachrechnen lassen. */
+function montageLaden(): void {
+  montageAktualisieren(muster().teile)
+    .then((neu) => {
+      if (!neu) return;
+      neuZeichnen();
+      eigenschaftenAktualisieren();
+    })
+    .catch((e: unknown) => melden(fehlertext(String(e))));
 }
 
 /** Fehlende Geometrie nachladen und danach neu zeichnen. */
@@ -293,6 +379,24 @@ function stiftLoslassen(): void {
   }
 }
 
+/** Waagerecht und senkrecht gezeichnete Linien bekommen gleich die
+ * passende Bedingung, wie in CAD-Skizzen üblich. */
+function geradeKanten(f: PfadForm): Bedingung[] {
+  const aus: Bedingung[] = [];
+  const punkte = pfadPunkte(f);
+  for (let k = 0; k < kantenzahl(f); k++) {
+    const e = kante(f, k);
+    if (e.element.art !== "linie") continue;
+    const a = punkte[e.von]!;
+    const b = punkte[e.bis]!;
+    const dx = Math.abs(b[0] - a[0]);
+    const dy = Math.abs(b[1] - a[1]);
+    if (dy < 1e-9 && dx > 1e-9) aus.push({ art: "horizontal", kante: k });
+    else if (dx < 1e-9 && dy > 1e-9) aus.push({ art: "vertikal", kante: k });
+  }
+  return aus;
+}
+
 /** Entwurf als Teil (geschlossen) oder Linie (offen) übernehmen. */
 function pfadFertig(geschlossen: boolean): void {
   const e = pfadEntwurf;
@@ -311,7 +415,8 @@ function pfadFertig(geschlossen: boolean): void {
   aendern((m) => {
     const id = neueId(m);
     const name = `${t(geschlossen ? "form.pfad" : "form.linie")} ${id}`;
-    const form: Form = { art: "pfad", start: [0, 0], elemente, geschlossen };
+    const form: PfadForm = { art: "pfad", start: [0, 0], elemente, geschlossen, bedingungen: [] };
+    form.bedingungen = geradeKanten(form);
     // Linien sind oft Markierungen: ohne Naht anlegen.
     m.teile.push({ id, name, form, x: x0, y: y0, naht: geschlossen ? { ...m.standardNaht } : null });
     auswahl = id;
@@ -321,6 +426,10 @@ function pfadFertig(geschlossen: boolean): void {
 
 function allesAktualisieren(): void {
   geometrieLaden();
+  skizzeLaden();
+  montageLaden();
+  knopfMasse.setAttribute("aria-pressed", String(zeigeMasse));
+  knopfZusammenbau.setAttribute("aria-pressed", String(zusammenbau));
   listeAktualisieren();
   eigenschaftenAktualisieren();
   knopfZurueck.disabled = !verlauf.kannZurueck;
@@ -351,9 +460,12 @@ function werkzeugWaehlen(w: Werkzeug): void {
     pfadEntwurf.griff = [0, 0];
   }
   werkzeug = w;
+  skizzenWahl = { kanten: [], punkte: [] };
+  skizzenHover = { kante: null, punkt: null };
   for (const [id, b] of werkzeugKnoepfe) b.setAttribute("aria-pressed", String(id === w));
   canvas.dataset["werkzeug"] = w;
   stiftMeldung();
+  eigenschaftenAktualisieren();
   neuZeichnen();
 }
 
@@ -478,13 +590,34 @@ function textFeld(beschriftung: string, wert: string, setzen: (x: string) => voi
 }
 
 function eigenschaftenAktualisieren(): void {
-  // Fokus merken, damit Tippen nicht unterbrochen wird.
-  const fokusIndex = [...eigenschaften.querySelectorAll("input,select,button")].indexOf(document.activeElement as Element);
+  // Fokus merken, damit Tippen nicht unterbrochen wird. Wiedergefunden
+  // wird das Feld an Art, Beschriftung und Reihenfolge, damit der Fokus nie
+  // auf ein anderes Feld springt, wenn sich der Abschnitt verändert hat.
+  const bedienelemente = () => [...eigenschaften.querySelectorAll<HTMLElement>("input,select,button")];
+  const kennung = (e: Element) =>
+    `${e.tagName}|${e.closest(".feld")?.querySelector("label")?.textContent ?? ""}|${e.tagName === "BUTTON" ? e.textContent : ""}`;
+  const vorher = bedienelemente();
+  const fokusIndex = vorher.indexOf(document.activeElement as HTMLElement);
+  const fokusKennung = fokusIndex >= 0 ? kennung(vorher[fokusIndex]!) : "";
   eigenschaften.replaceChildren();
   const g = gewaehlt();
   if (g) eigenschaften.append(...teilFelder(g));
   else eigenschaften.append(...musterFelder());
-  if (fokusIndex >= 0) (eigenschaften.querySelectorAll("input,select,button")[fokusIndex] as HTMLElement | undefined)?.focus();
+  if (fokusBedingung !== null) {
+    const feld = eigenschaften.querySelector<HTMLInputElement>(`[data-bedingung="${fokusBedingung}"] input`);
+    fokusBedingung = null;
+    if (feld) {
+      feld.focus();
+      feld.select();
+      return;
+    }
+  }
+  if (fokusIndex >= 0) {
+    const nachher = bedienelemente();
+    const gleich = nachher[fokusIndex];
+    if (gleich && kennung(gleich) === fokusKennung) gleich.focus();
+    else nachher.find((e) => kennung(e) === fokusKennung)?.focus();
+  }
 }
 
 function teilFelder(g: Teil): HTMLElement[] {
@@ -498,8 +631,9 @@ function teilFelder(g: Teil): HTMLElement[] {
   if (f.art === "kreis") {
     felder.push(zahlFeld(t("teil.durchmesser"), f.durchmesser, (x) => aendern(() => (f.durchmesser = x))));
   } else if (f.art === "pfad") {
-    felder.push(...pfadFelder(f));
+    felder.push(...pfadFelder(f), ...skizzenFelder(g, f));
   } else {
+    if (f.art !== "tpocket" && zeigeMasse) felder.push(el("p", { class: "meldung" }, t("skizze.grundform")));
     felder.push(
       zahlFeld(t("teil.breite"), f.breite, (x) => aendern(() => (f.breite = x))),
       zahlFeld(t("teil.hoehe"), f.hoehe, (x) => aendern(() => (f.hoehe = x))),
@@ -535,6 +669,25 @@ function teilFelder(g: Teil): HTMLElement[] {
       auswahlFeld<Eisen>(t("naht.eisen"), n.eisen, [["french", t("eisen.french")], ["diamond", t("eisen.diamond")], ["japan", t("eisen.japan")], ["round", t("eisen.round")]], (x) => aendern((m) => ((n.eisen = x), merke(m)))),
       auswahlFeld<Ecke>(t("naht.ecke"), n.ecke, [["ein", t("ecke.ein")], ["aus", t("ecke.aus")], ["mitte", t("ecke.mitte")]], (x) => aendern((m) => ((n.ecke = x), merke(m)))),
     );
+    if (f.art === "pfad" && f.geschlossen) {
+      felder.push(el("p", { class: "feld-titel" }, t("naht.kanten")));
+      const n = kantenzahl(f);
+      const zeile = el("div", { class: "kanten-wahl" });
+      for (let k = 0; k < n; k++) {
+        const id = `feld-${++feldNummer}`;
+        const box = el("input", { id, type: "checkbox" });
+        box.checked = f.naehte?.[k] ?? true;
+        box.addEventListener("change", () =>
+          aendern(() => {
+            const neu = Array.from({ length: n }, (_, i) => f.naehte?.[i] ?? true);
+            neu[k] = box.checked;
+            f.naehte = neu.every((x) => x) ? undefined : neu;
+          }),
+        );
+        zeile.append(el("span", { class: "feld-zeile" }, box, el("label", { for: id }, t("skizze.kante", { n: k + 1 }))));
+      }
+      felder.push(zeile);
+    }
     if (f.art === "tpocket") {
       felder.push(el("p", { class: "feld-titel" }, t("naht.kanten")));
       const kante = (text: TextSchluessel, wert: boolean, setzen: (x: boolean) => void) => {
@@ -560,6 +713,8 @@ function teilFelder(g: Teil): HTMLElement[] {
     }
   }
 
+  felder.push(...montageFelder(g));
+
   const dup = el("button", { type: "button", title: `${t("teil.duplizieren")} (Strg+D)` }, t("teil.duplizieren"));
   dup.addEventListener("click", duplizieren);
   const weg = el("button", { type: "button", class: "gefahr", title: `${t("teil.loeschen")} (Entf)` }, t("teil.loeschen"));
@@ -575,12 +730,21 @@ function pfadFelder(f: Extract<Form, { art: "pfad" }>): HTMLElement[] {
   const zu = `feld-${++feldNummer}`;
   const k = el("input", { id: zu, type: "checkbox" });
   k.checked = f.geschlossen;
-  k.addEventListener("change", () => aendern(() => (f.geschlossen = k.checked)));
+  k.addEventListener("change", () =>
+    aendern(() => {
+      f.geschlossen = k.checked;
+      // Die Schlusslinie kommt oder geht: Bedingungen und Nähte daran fallen weg.
+      f.bedingungen = f.bedingungen.filter((b) => bedingungGueltig(f, b));
+      f.naehte = undefined;
+    }),
+  );
   felder.push(el("div", { class: "feld feld-zeile" }, k, el("label", { for: zu }, t("pfad.geschlossen"))));
   let nr = 0;
   for (const e of f.elemente) {
     if (e.art !== "bogen") continue;
     nr++;
+    // Mit Bemaßung bestimmt die Skizze die Bögen.
+    if (f.bedingungen.length > 0) continue;
     felder.push(el("p", { class: "feld-titel" }, t("pfad.bogen", { n: nr })));
     felder.push(zahlFeld(t("pfad.radius"), e.radius, (x) => aendern(() => (e.radius = x))));
     const umdrehen = el("button", { type: "button" }, t("pfad.umkehren"));
@@ -610,7 +774,347 @@ function musterFelder(): HTMLElement[] {
     auswahlFeld(t("druck.papier"), d.papier, [["a4", "A4"], ["a3", "A3"], ["letter", "US Letter"]], (x) => aendern((m) => (m.druck.papier = x))),
     zahlFeld(t("druck.rand"), d.rand, (x) => aendern((m) => (m.druck.rand = x))),
     zahlFeld(t("druck.klebekante"), d.klebekante, (x) => aendern((m) => (m.druck.klebekante = x))),
+    ...anleitungFelder(),
   ];
+}
+
+function anleitungFelder(): HTMLElement[] {
+  const a = muster().anleitung;
+  if (!a || a.length === 0) return [];
+  return [el("h2", {}, t("anleitung")), el("ol", { class: "anleitung" }, ...a.map((x) => el("li", {}, x)))];
+}
+
+// ---------------------------------------------------------------- Skizze
+
+const kantenArt = (f: PfadForm, k: number) => kante(f, k).element.art;
+
+/** Passt die Bedingung (noch) zum Pfad? */
+function bedingungGueltig(f: PfadForm, b: Bedingung): boolean {
+  const n = kantenzahl(f);
+  const p = punktzahl(f);
+  switch (b.art) {
+    case "laenge":
+    case "radius":
+    case "horizontal":
+    case "vertikal":
+      return b.kante < n;
+    case "abstand":
+    case "abstandX":
+    case "abstandY":
+      return b.a < p && b.b < p;
+    case "fest":
+      return b.punkt < p;
+    default:
+      return b.a < n && b.b < n;
+  }
+}
+
+const freiText = (n: number) => (n === 1 ? t("skizze.frei1") : t("skizze.frei", { n }));
+
+/** Neue Bedingungen lösen lassen und nur übernehmen, wenn die Skizze
+ * lösbar und nicht überbestimmt ist. */
+async function skizzeSetzen(g: Teil, bedingungen: Bedingung[], fokus: number | null = null): Promise<boolean> {
+  const f = g.form;
+  if (f.art !== "pfad") return false;
+  const vorher = JSON.stringify(f);
+  const versuch: PfadForm = { ...structuredClone(f), bedingungen };
+  try {
+    const e = await skizzeLoesen(versuch);
+    if (e.ueberbestimmt) {
+      melden(t("skizze.ueberbestimmt"));
+      eigenschaftenAktualisieren();
+      neuZeichnen();
+      return false;
+    }
+    // Inzwischen geändert (z. B. rückgängig gemacht): nichts überschreiben.
+    const jetzt = muster().teile.find((x) => x.id === g.id);
+    if (!jetzt || JSON.stringify(jetzt.form) !== vorher || jetzt.form.art !== "pfad") return false;
+    const form = jetzt.form;
+    fokusBedingung = fokus;
+    aendern(() => {
+      form.bedingungen = bedingungen;
+      form.elemente = e.elemente;
+    });
+    melden(e.freiheitsgrade === 0 ? t("skizze.bestimmt") : freiText(e.freiheitsgrade));
+    return true;
+  } catch (err) {
+    melden(fehlertext(String(err)));
+    eigenschaftenAktualisieren();
+    neuZeichnen();
+    return false;
+  }
+}
+
+function winkelZwischen(f: PfadForm, a: number, b: number): number {
+  const punkte = pfadPunkte(f);
+  const r = (k: number): P => {
+    const e = kante(f, k);
+    const p = punkte[e.von]!;
+    const q = punkte[e.bis]!;
+    return [q[0] - p[0], q[1] - p[1]];
+  };
+  const [ax, ay] = r(a);
+  const [bx, by] = r(b);
+  const c = (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1);
+  return (Math.acos(Math.max(-1, Math.min(1, c))) * 180) / Math.PI;
+}
+
+/** Bedingungen, die zur Auswahl passen, mit den gezeichneten Werten. */
+function moeglicheBedingungen(f: PfadForm, w: SkizzenWahl): { text: TextSchluessel; b: Bedingung }[] {
+  const aus: { text: TextSchluessel; b: Bedingung }[] = [];
+  const runde = (x: number) => Math.round(x * 100) / 100;
+  const punkte = pfadPunkte(f);
+  if (w.kanten.length === 1 && w.punkte.length === 0) {
+    const k = w.kanten[0]!;
+    const art = kantenArt(f, k);
+    if (art === "linie") {
+      aus.push(
+        { text: "skizze.laenge", b: { art: "laenge", kante: k, wert: runde(kantenLaenge(f, k)) } },
+        { text: "skizze.horizontal", b: { art: "horizontal", kante: k } },
+        { text: "skizze.vertikal", b: { art: "vertikal", kante: k } },
+      );
+    } else if (art === "bogen") {
+      const e = kante(f, k).element;
+      if (e.art === "bogen") aus.push({ text: "skizze.radius", b: { art: "radius", kante: k, wert: runde(e.radius) } });
+    }
+  } else if (w.kanten.length === 2 && w.punkte.length === 0) {
+    const [a, b] = w.kanten as [number, number];
+    const artA = kantenArt(f, a);
+    const artB = kantenArt(f, b);
+    if (artA === "linie" && artB === "linie") {
+      aus.push(
+        { text: "skizze.parallel", b: { art: "parallel", a, b } },
+        { text: "skizze.senkrecht", b: { art: "senkrecht", a, b } },
+        { text: "skizze.gleich", b: { art: "gleich", a, b } },
+        { text: "skizze.winkel", b: { art: "winkel", a, b, grad: runde(winkelZwischen(f, a, b)) } },
+      );
+    } else if (artA === "bogen" && artB === "bogen") {
+      aus.push({ text: "skizze.gleich", b: { art: "gleich", a, b } });
+    }
+    // Tangential nur an einem gemeinsamen Punkt.
+    const ka = kante(f, a);
+    const kb = kante(f, b);
+    const teilen = ka.bis === kb.von || kb.bis === ka.von;
+    if (teilen && (artA !== "linie" || artB !== "linie")) aus.push({ text: "skizze.tangential", b: { art: "tangential", a, b } });
+  } else if (w.punkte.length === 2 && w.kanten.length === 0) {
+    const [a, b] = w.punkte as [number, number];
+    const p = punkte[a]!;
+    const q = punkte[b]!;
+    const dx = Math.abs(q[0] - p[0]);
+    const dy = Math.abs(q[1] - p[1]);
+    if (dx > 1e-6) aus.push({ text: "skizze.abstandX", b: { art: "abstandX", a, b, wert: runde(dx) } });
+    if (dy > 1e-6) aus.push({ text: "skizze.abstandY", b: { art: "abstandY", a, b, wert: runde(dy) } });
+    aus.push({ text: "skizze.abstand", b: { art: "abstand", a, b, wert: runde(Math.hypot(dx, dy)) } });
+  } else if (w.punkte.length === 1 && w.kanten.length === 0) {
+    const a = w.punkte[0]!;
+    const p = punkte[a]!;
+    aus.push({ text: "skizze.fest", b: { art: "fest", punkt: a, x: runde(p[0]), y: runde(p[1]) } });
+  }
+  return aus;
+}
+
+/** Bezeichnung einer Bedingung in der Liste, Kanten und Punkte ab 1 gezählt. */
+function bedingungText(b: Bedingung): string {
+  switch (b.art) {
+    case "laenge":
+    case "radius":
+    case "horizontal":
+    case "vertikal":
+      return t(`skizze.${b.art}.text` as TextSchluessel, { k: b.kante + 1 });
+    case "abstand":
+    case "abstandX":
+    case "abstandY":
+      return t(`skizze.${b.art}.text` as TextSchluessel, { a: b.a + 1, b: b.b + 1 });
+    case "fest":
+      return t("skizze.fest.text", { a: b.punkt + 1 });
+    default:
+      return t(`skizze.${b.art}.text` as TextSchluessel, { a: b.a + 1, b: b.b + 1 });
+  }
+}
+
+/** Abschnitt „Skizze“: Zustand, Bemaßen, Maße und Bedingungen. */
+function skizzenFelder(g: Teil, f: PfadForm): HTMLElement[] {
+  const felder: HTMLElement[] = [el("h3", {}, t("skizze"))];
+  const e = skizzeSofort(f);
+  const zustand = !e
+    ? t("skizze.unbekannt")
+    : e.freiheitsgrade === 0
+      ? t("skizze.bestimmt")
+      : freiText(e.freiheitsgrade);
+  felder.push(el("p", { class: e?.freiheitsgrade === 0 ? "meldung gut" : "meldung" }, zustand));
+
+  if (werkzeug !== "bemassen") {
+    const b = el("button", { type: "button", title: `${t("werkzeug.bemassen")} (D)` }, t("skizze.bemassen"));
+    b.addEventListener("click", () => werkzeugWaehlen("bemassen"));
+    felder.push(el("div", { class: "knopfzeile knopfzeile-eng" }, b));
+  } else {
+    const moeglich = moeglicheBedingungen(f, skizzenWahl);
+    if (moeglich.length === 0) {
+      felder.push(el("p", { class: "meldung" }, t("skizze.waehlen")));
+    } else {
+      const zeile = el("div", { class: "knopfzeile knopfzeile-eng bedingungen-knoepfe" });
+      for (const m of moeglich) {
+        const b = el("button", { type: "button" }, t(m.text));
+        b.addEventListener("click", () => {
+          const neu = [...f.bedingungen, m.b];
+          skizzenWahl = { kanten: [], punkte: [] };
+          void skizzeSetzen(g, neu, istMass(m.b) ? neu.length - 1 : null);
+        });
+        zeile.append(b);
+      }
+      felder.push(zeile);
+    }
+  }
+
+  const masse = f.bedingungen.map((b, i) => [b, i] as const).filter(([b]) => istMass(b));
+  const andere = f.bedingungen.map((b, i) => [b, i] as const).filter(([b]) => !istMass(b));
+  const entfernen = (i: number) => {
+    const knopf = el("button", { type: "button", class: "klein entfernen", title: t("skizze.entfernen"), "aria-label": t("skizze.entfernen") }, "×");
+    knopf.addEventListener("click", () => void skizzeSetzen(g, f.bedingungen.filter((_, j) => j !== i)));
+    return knopf;
+  };
+  if (masse.length > 0) {
+    felder.push(el("p", { class: "feld-titel" }, t("skizze.masse")));
+    for (const [b, i] of masse) {
+      if (!istMass(b)) continue;
+      const wert = "wert" in b ? b.wert : b.grad;
+      const feld = zahlFeld(
+        bedingungText(b),
+        wert,
+        (x) => {
+          const neu = structuredClone(f.bedingungen);
+          const z = neu[i]!;
+          if ("wert" in z) z.wert = x;
+          else if ("grad" in z) z.grad = x;
+          void skizzeSetzen(g, neu);
+        },
+        b.art === "winkel" ? "°" : "mm",
+      );
+      felder.push(el("div", { class: "mass-zeile", "data-bedingung": String(i) }, feld, entfernen(i)));
+    }
+  }
+  if (andere.length > 0) {
+    felder.push(el("p", { class: "feld-titel" }, t("skizze.bedingungen")));
+    const liste = el("ul", { class: "bedingungen" });
+    for (const [b, i] of andere) liste.append(el("li", {}, el("span", {}, bedingungText(b)), entfernen(i)));
+    felder.push(liste);
+  }
+  return felder;
+}
+
+/** Treffer auf einen Punkt (Vorrang) oder eine Kante der Skizze. */
+function skizzenTreffer(g: Teil, mx: number, my: number): { punkt: number | null; kante: number | null } {
+  const f = g.form;
+  if (f.art !== "pfad") return { punkt: null, kante: null };
+  const x = mx - g.x;
+  const y = my - g.y;
+  const fang = 7 / ansicht.massstab;
+  let punkt: number | null = null;
+  let best = fang;
+  pfadPunkte(f)
+    .slice(0, punktzahl(f))
+    .forEach((q, i) => {
+      const d = Math.hypot(q[0] - x, q[1] - y);
+      if (d <= best) {
+        best = d;
+        punkt = i;
+      }
+    });
+  if (punkt !== null) return { punkt, kante: null };
+  let kanteNr: number | null = null;
+  best = fang;
+  for (let k = 0; k < kantenzahl(f); k++) {
+    const d = abstandZuLinie(kantePunkte(f, k), x, y);
+    if (d <= best) {
+      best = d;
+      kanteNr = k;
+    }
+  }
+  return { punkt: null, kante: kanteNr };
+}
+
+/** Bemaßen: Klick wählt Punkte und Kanten (bis zu zwei), ein Klick auf ein
+ * anderes Teil wählt dieses. */
+function bemassenKlick(mx: number, my: number): void {
+  const g = gewaehlt();
+  const treffer = g ? skizzenTreffer(g, mx, my) : null;
+  if (g && treffer && (treffer.punkt !== null || treffer.kante !== null)) {
+    const w = skizzenWahl;
+    const liste = treffer.punkt !== null ? w.punkte : w.kanten;
+    const i = (treffer.punkt ?? treffer.kante)!;
+    if (liste.includes(i)) liste.splice(liste.indexOf(i), 1);
+    else {
+      if (w.punkte.length + w.kanten.length >= 2) skizzenWahl = { kanten: [], punkte: [] };
+      (treffer.punkt !== null ? skizzenWahl.punkte : skizzenWahl.kanten).push(i);
+    }
+  } else {
+    const anderes = trefferBei(mx, my);
+    auswahl = anderes?.id ?? null;
+    skizzenWahl = { kanten: [], punkte: [] };
+    if (anderes && anderes.form.art !== "pfad") melden(t("skizze.nurPfad"));
+  }
+  allesAktualisieren();
+}
+
+/** Doppelklick beim Bemaßen: Länge oder Radius der Kante als Maß. */
+function bemassenDoppelklick(mx: number, my: number): void {
+  const g = gewaehlt();
+  if (!g || g.form.art !== "pfad") return;
+  const f = g.form;
+  const tr = skizzenTreffer(g, mx, my);
+  if (tr.kante === null) return;
+  const m = moeglicheBedingungen(f, { kanten: [tr.kante], punkte: [] }).find((x) => istMass(x.b));
+  if (!m) return;
+  skizzenWahl = { kanten: [], punkte: [] };
+  const neu = [...f.bedingungen, m.b];
+  void skizzeSetzen(g, neu, neu.length - 1);
+}
+
+// ---------------------------------------------------------------- Zusammenbau
+
+function montageFelder(g: Teil): HTMLElement[] {
+  const felder: HTMLElement[] = [el("h3", {}, t("montage"))];
+  const id = `feld-${++feldNummer}`;
+  const an = el("input", { id, type: "checkbox" });
+  an.checked = !!g.montage;
+  an.addEventListener("change", () => aendern(() => (g.montage = an.checked ? { x: g.x, y: g.y, schritt: 1 } : null)));
+  felder.push(el("div", { class: "feld feld-zeile" }, an, el("label", { for: id }, t("montage.an"))));
+  const m = g.montage;
+  if (!m) return felder;
+  felder.push(
+    zahlFeld(t("montage.x"), m.x, (x) => aendern(() => (m.x = x))),
+    zahlFeld(t("montage.y"), m.y, (y) => aendern(() => (m.y = y))),
+    zahlFeld(t("montage.schritt"), m.schritt, (x) => aendern(() => (m.schritt = Math.max(0, Math.min(1000, Math.round(x))))), ""),
+  );
+  const u = uebernommeneSofort(g);
+  if (u) {
+    if (u.anzahl > 0) felder.push(el("p", { class: "meldung" }, t("montage.uebernommen", { n: u.anzahl })));
+    if (u.kantennah > 0) felder.push(el("p", { class: "meldung fehler", role: "alert" }, t("montage.kantennah", { n: u.kantennah })));
+    if (u.zuDicht > 0) felder.push(el("p", { class: "meldung fehler", role: "alert" }, t("montage.zuDicht", { n: u.zuDicht })));
+  }
+  return felder;
+}
+
+async function vorlageEinsetzen(): Promise<void> {
+  try {
+    const v = await vorlageLaden("bifold");
+    aendern((m) => {
+      const teile: Teil[] = [];
+      for (const x of v.teile) {
+        teile.push({ id: neueId({ ...m, teile }), name: x.name ?? "", form: x.form, x: x.x, y: x.y, naht: x.stiche, montage: x.montage });
+      }
+      m.teile = teile;
+      m.anleitung = v.schritte;
+    });
+    auswahl = null;
+    // Erst die Geometrie, dann passt „Alles zeigen“.
+    await Promise.all(muster().teile.map(pfadeFuer));
+    ansicht.allesZeigen(muster(), zusammenbau);
+    melden(t("vorlage.geladen"));
+    allesAktualisieren();
+  } catch (e) {
+    melden(fehlertext(String(e)));
+  }
 }
 
 // ---------------------------------------------------------------- Zeiger
@@ -636,10 +1140,11 @@ function trefferBei(mx: number, my: number): Teil | undefined {
   for (let i = teile.length - 1; i >= 0; i--) {
     const x = teile[i]!;
     const p = pfadeSofort(x);
-    if (!p) continue;
+    const ort = lage(x, zusammenbau);
+    if (!p || !ort) continue;
     const g = p.geometrie;
-    const nah = abstandZuLinie(g.geschlossen ? [...g.kontur, g.kontur[0]!] : g.kontur, mx - x.x, my - x.y) * ansicht.massstab <= 6;
-    if (nah || (g.geschlossen && enthaelt(g.kontur, mx - x.x, my - x.y))) return x;
+    const nah = abstandZuLinie(g.geschlossen ? [...g.kontur, g.kontur[0]!] : g.kontur, mx - ort[0], my - ort[1]) * ansicht.massstab <= 6;
+    if (nah || (g.geschlossen && enthaelt(g.kontur, mx - ort[0], my - ort[1]))) return x;
   }
   return undefined;
 }
@@ -654,10 +1159,13 @@ canvas.addEventListener("pointerdown", (e) => {
   } else if (istStift(werkzeug)) {
     if (e.button === 0) stiftDruecken(e);
     neuZeichnen();
+  } else if (werkzeug === "bemassen") {
+    if (e.button === 0) bemassenKlick(mx, my);
   } else if (werkzeug === "auswahl") {
     const treffer = trefferBei(mx, my);
     auswahl = treffer?.id ?? null;
-    if (treffer) ziehen = { art: "verschieben", ...basis, teilX: treffer.x, teilY: treffer.y };
+    const ort = treffer && lage(treffer, zusammenbau);
+    if (ort) ziehen = { art: "verschieben", ...basis, teilX: ort[0], teilY: ort[1] };
     allesAktualisieren();
   } else {
     ziehen = { art: "aufziehen", ...basis };
@@ -672,6 +1180,15 @@ canvas.addEventListener("pointermove", (e) => {
     neuZeichnen();
     return;
   }
+  if (!ziehen && werkzeug === "bemassen") {
+    const g = gewaehlt();
+    const neu = g && !zusammenbau ? skizzenTreffer(g, mx, my) : { kante: null, punkt: null };
+    if (neu.kante !== skizzenHover.kante || neu.punkt !== skizzenHover.punkt) {
+      skizzenHover = neu;
+      neuZeichnen();
+    }
+    return;
+  }
   if (!ziehen) return;
   const z = ziehen;
   if (z.art === "schwenken") {
@@ -684,8 +1201,10 @@ canvas.addEventListener("pointermove", (e) => {
       verlauf.merken();
       z.gemerkt = true;
     }
-    g.x = runden(z.teilX + mx - z.mx, e.altKey);
-    g.y = runden(z.teilY + my - z.my, e.altKey);
+    const ziel = zusammenbau ? g.montage : g;
+    if (!ziel) return;
+    ziel.x = runden(z.teilX + mx - z.mx, e.altKey);
+    ziel.y = runden(z.teilY + my - z.my, e.altKey);
   } else {
     let x0 = runden(z.mx, e.altKey);
     let y0 = runden(z.my, e.altKey);
@@ -731,8 +1250,18 @@ canvas.addEventListener("pointerup", () => {
   neuZeichnen();
 });
 
-canvas.addEventListener("dblclick", () => {
+canvas.addEventListener("pointerleave", () => {
+  if (skizzenHover.kante === null && skizzenHover.punkt === null) return;
+  skizzenHover = { kante: null, punkt: null };
+  neuZeichnen();
+});
+
+canvas.addEventListener("dblclick", (e) => {
   if (pfadEntwurf) pfadFertig(false);
+  else if (werkzeug === "bemassen") {
+    const [mx, my] = ansicht.zuMuster(e.offsetX, e.offsetY);
+    bemassenDoppelklick(mx, my);
+  }
 });
 
 canvas.addEventListener(
@@ -757,6 +1286,7 @@ const TASTEN: Record<string, Werkzeug> = {
   l: "linie",
   b: "bogen",
   p: "bezier",
+  d: "bemassen",
 };
 
 window.addEventListener("keydown", (e) => {
@@ -798,13 +1328,20 @@ window.addEventListener("keydown", (e) => {
   } else if (TASTEN[taste]) {
     werkzeugWaehlen(TASTEN[taste]);
   } else if (taste === "0") {
-    ansicht.allesZeigen(muster());
+    ansicht.allesZeigen(muster(), zusammenbau);
     neuZeichnen();
+  } else if (taste === "m") {
+    masseUmschalten();
+  } else if (taste === "z") {
+    zusammenbauUmschalten();
   } else if (taste === "+" || taste === "-") {
     ansicht.zoomen(taste === "+" ? 1.25 : 0.8, canvas.clientWidth / 2, canvas.clientHeight / 2);
     neuZeichnen();
   } else if ((taste === "delete" || taste === "backspace") && e.target === canvas) {
     loeschen();
+  } else if (taste === "escape" && werkzeug === "bemassen" && skizzenWahl.kanten.length + skizzenWahl.punkte.length > 0) {
+    skizzenWahl = { kanten: [], punkte: [] };
+    allesAktualisieren();
   } else if (taste === "escape") {
     auswahl = null;
     vorschau = null;
@@ -821,6 +1358,19 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("keyup", (e) => {
   if (e.key === " ") leertaste = false;
 });
+
+function masseUmschalten(): void {
+  zeigeMasse = !zeigeMasse;
+  allesAktualisieren();
+}
+
+function zusammenbauUmschalten(): void {
+  zusammenbau = !zusammenbau;
+  skizzenWahl = { kanten: [], punkte: [] };
+  melden(t(zusammenbau ? "ansicht.zusammenbau.an" : "ansicht.zusammenbau.aus"));
+  ansicht.allesZeigen(muster(), zusammenbau);
+  allesAktualisieren();
+}
 
 // ---------------------------------------------------------------- Export
 
@@ -910,9 +1460,12 @@ async function leistungstest(): Promise<void> {
 knopfZurueck.addEventListener("click", rueckgaengig);
 knopfVor.addEventListener("click", wiederholen);
 knopfAlles.addEventListener("click", () => {
-  ansicht.allesZeigen(muster());
+  ansicht.allesZeigen(muster(), zusammenbau);
   neuZeichnen();
 });
+knopfMasse.addEventListener("click", masseUmschalten);
+knopfZusammenbau.addEventListener("click", zusammenbauUmschalten);
+knopfVorlage.addEventListener("click", () => void vorlageEinsetzen());
 knopfExport.addEventListener("click", () => void exportieren());
 knopfTest.addEventListener("click", () => void leistungstest());
 

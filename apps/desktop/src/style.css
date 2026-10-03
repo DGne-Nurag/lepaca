@@ -16,6 +16,12 @@
   --kante: #3b2a18;
   --loch: #2a1d10;
   --auswahl: #1b6ac9;
+  --frei: #1b6ac9;
+  --markiert: #d9661f;
+  --mass: #7a6d5c;
+  --mass-stark: #3d3226;
+  --symbol: #3d3226;
+  --symbol-text: #fbfaf7;
   color-scheme: light dark;
   font: 14px/1.4 system-ui, -apple-system, "Segoe UI", "Noto Sans", sans-serif;
 }
@@ -38,6 +44,12 @@
     --kante: #f1dfc4;
     --loch: #f6ead8;
     --auswahl: #7fb2ff;
+    --frei: #7fb2ff;
+    --markiert: #ffa25c;
+    --mass: #a89c8c;
+    --mass-stark: #e8dccb;
+    --symbol: #e8dccb;
+    --symbol-text: #201e1b;
   }
 }
 
@@ -375,4 +387,73 @@ button.klein {
 .knopfzeile-eng {
   margin-top: 0;
   margin-bottom: 10px;
+}
+
+/* Umschalter in der Kopfzeile (Maße, Zusammenbau) */
+.kopf button[aria-pressed="true"] {
+  background: var(--akzent);
+  border-color: var(--akzent);
+  color: var(--akzent-text);
+}
+
+/* Skizze: Maße mit Entfernen-Knopf, Bedingungsliste */
+.meldung.gut {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.bedingungen-knoepfe {
+  flex-wrap: wrap;
+}
+
+.mass-zeile {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.mass-zeile .feld {
+  flex: 1;
+}
+
+.mass-zeile .entfernen {
+  margin-bottom: 14px;
+}
+
+.bedingungen {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  font-size: 13px;
+}
+
+.bedingungen li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.kanten-wahl {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 2px 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.kanten-wahl .feld-zeile {
+  display: flex;
+}
+
+.anleitung {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.anleitung li {
+  margin-bottom: 6px;
 }

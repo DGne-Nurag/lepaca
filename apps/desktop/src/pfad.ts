@@ -2,7 +2,7 @@
 // Vorschau beim Zeichnen und für Bedienhilfen. Maßgeblich bleibt die
 // Berechnung im Rust-Kern.
 
-import type { Element, P } from "./modell";
+import { kante, type Element, type P, type PfadForm } from "./modell";
 
 /** Mittelpunkt und Winkel eines Bogens wie im Kern (`bogen_flach`);
  * `null`, wenn der Bogen unmöglich ist. */
@@ -100,4 +100,51 @@ export function auf45Grad(von: P, nach: P): P {
   const w = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
   const l = Math.hypot(dx, dy);
   return [von[0] + Math.cos(w) * l, von[1] + Math.sin(w) * l];
+}
+
+/** Zeichnet Kante k eines Pfads (mit moveTo an ihren Anfang). */
+export function kanteZeichnen(c: CanvasPath, f: PfadForm, k: number): void {
+  const e = kante(f, k);
+  const punkte = [f.start, ...f.elemente.map((x) => x.ziel)];
+  const von = punkte[e.von]!;
+  c.moveTo(von[0], von[1]);
+  elementeZeichnen(c, von, [e.element]);
+}
+
+/** Kante k als Punktfolge zum Treffertest (Bögen und Kurven abgetastet). */
+export function kantePunkte(f: PfadForm, k: number): P[] {
+  const e = kante(f, k);
+  const punkte = [f.start, ...f.elemente.map((x) => x.ziel)];
+  const von = punkte[e.von]!;
+  const el = e.element;
+  if (el.art === "linie") return [von, el.ziel];
+  const n = 24;
+  const aus: P[] = [];
+  if (el.art === "kurve") {
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      const u = 1 - t;
+      const a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+      aus.push([
+        a * von[0] + b * el.k1[0] + c * el.k2[0] + d * el.ziel[0],
+        a * von[1] + b * el.k1[1] + c * el.k2[1] + d * el.ziel[1],
+      ]);
+    }
+    return aus;
+  }
+  const b = bogenDaten(von, el.ziel, el.radius, el.uhrzeigersinn, el.gross);
+  if (!b) return [von, el.ziel];
+  for (let i = 0; i <= n; i++) {
+    const w = b.w0 + ((b.w1 - b.w0) * i) / n;
+    aus.push([b.mitte[0] + el.radius * Math.cos(w), b.mitte[1] + el.radius * Math.sin(w)]);
+  }
+  return aus;
+}
+
+/** Länge einer Kante (für Startwerte von Maßen). */
+export function kantenLaenge(f: PfadForm, k: number): number {
+  const p = kantePunkte(f, k);
+  let l = 0;
+  for (let i = 1; i < p.length; i++) l += Math.hypot(p[i]![0] - p[i - 1]![0], p[i]![1] - p[i - 1]![1]);
+  return l;
 }
