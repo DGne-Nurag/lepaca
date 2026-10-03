@@ -8,11 +8,14 @@
 
 use std::fmt::Write;
 
+use lepaca_core::ausschnitt;
 use lepaca_core::eisen::Lochform;
 use lepaca_core::form::Form;
 use lepaca_core::geometrie::{Kontur, Punkt};
 use lepaca_core::kachelung::{self, Kachel, KachelFehler, Kachelplan};
-use lepaca_core::muster::{self, Musterteil, StichOderForm, Teil, TeilForm, UebernommenesLoch};
+use lepaca_core::muster::{
+    self, Musterteil, StichOderForm, Teil, TeilForm, UebernommenesLoch, Umriss,
+};
 use lepaca_core::skizze::{self, Masslinie};
 use lepaca_core::stichlinie::Stichreihe;
 
@@ -25,6 +28,8 @@ const PT_PRO_MM: f64 = 72.0 / 25.4;
 pub struct Druckteil<'a> {
     pub umriss: &'a [Punkt],
     pub geschlossen: bool,
+    /// Ausgestanzte Formen: weitere Schnittlinien im Teil.
+    pub ausschnitte: &'a [Kontur],
     pub stiche: Option<(&'a Stichreihe, &'a Lochform)>,
     /// Name, wird in die Mitte des Teils gedruckt.
     pub name: Option<&'a str>,
@@ -45,6 +50,7 @@ impl<'a> Druckteil<'a> {
         Druckteil {
             umriss,
             geschlossen,
+            ausschnitte: &[],
             stiche,
             name: None,
             uebernommen: &[],
@@ -108,9 +114,19 @@ pub fn muster_pdf(
     let masse: Vec<Vec<Masslinie>> = teile
         .iter()
         .map(|t| match &t.teil.form {
-            TeilForm::Geschlossen(Form::Pfad(p)) => skizze::zeichnung(p, true, &t.bedingungen).0,
+            TeilForm::Geschlossen(f) => {
+                let mut m = match f {
+                    Form::Pfad(p) => skizze::zeichnung(p, true, &t.bedingungen).0,
+                    f => skizze::form_masse(f),
+                };
+                m.extend(ausschnitt::zeichnung(
+                    f,
+                    &t.teil.ausschnitte,
+                    &t.abstandsmasse,
+                ));
+                m
+            }
             TeilForm::Offen(p) => skizze::zeichnung(p, false, &t.bedingungen).0,
-            TeilForm::Geschlossen(f) => skizze::form_masse(f),
         })
         .collect();
 
@@ -134,6 +150,10 @@ pub fn muster_pdf(
         .map(|(((t, b), d), m)| Druckteil {
             umriss: b.umriss.punkte(),
             geschlossen: b.umriss.geschlossen(),
+            ausschnitte: match &b.umriss {
+                Umriss::Teil { ausschnitte, .. } => ausschnitte,
+                Umriss::Linie(_) => &[],
+            },
             stiche: b
                 .stiche
                 .as_ref()
@@ -202,6 +222,10 @@ fn kachelseite(
         let _ = writeln!(s, "0 G 0.25 w");
         linienzug(&mut s, teil.umriss);
         let _ = writeln!(s, "{}", if teil.geschlossen { "h S" } else { "S" });
+        for a in teil.ausschnitte {
+            linienzug(&mut s, a.punkte());
+            let _ = writeln!(s, "h S");
+        }
         if let Some((stiche, loch)) = teil.stiche {
             let _ = writeln!(s, "0.5 G 0.1 w [1 1] 0 d");
             for linie in &stiche.linien {
@@ -701,5 +725,45 @@ mod tests {
         assert!(t.contains("(217) Tj"));
         assert!(t.contains("(93) Tj"));
         assert!(t.contains("(R 6) Tj"));
+    }
+
+    #[test]
+    fn ein_ausgestanztes_loch_wird_mit_seinen_massen_mitgedruckt() {
+        use lepaca_core::ausschnitt::{Abstandsmass, Ausschnitt, Bezug};
+        use lepaca_core::mass::Mm;
+        use lepaca_core::muster::{Musterteil, Teil, TeilForm};
+        let mm = |x| Mm::neu(x).unwrap();
+        let teil = Musterteil {
+            name: "Deckel".into(),
+            teil: Teil {
+                form: TeilForm::Geschlossen(Form::Rechteck {
+                    breite: mm(100.0),
+                    hoehe: mm(60.0),
+                    eckenradius: mm(0.0),
+                }),
+                position: Punkt::neu(0.0, 0.0),
+                naht: None,
+                montage: None,
+                ausschnitte: vec![Ausschnitt {
+                    form: Form::Kreis {
+                        durchmesser: mm(20.0),
+                    },
+                    position: Punkt::neu(20.0, 15.0),
+                }],
+            },
+            bedingungen: Vec::new(),
+            abstandsmasse: vec![Abstandsmass::ZurKante {
+                ausschnitt: 0,
+                kante: 3,
+                bezug: Bezug::Mitte,
+                wert: mm(30.0),
+            }],
+        };
+        let (pdf, _) = muster_pdf(&[teil], KachelEinstellung::default()).unwrap();
+        let t = als_text(&pdf);
+        // Umriss und Loch sind je eine geschlossene Schnittlinie.
+        assert!(t.matches("h S").count() >= 2);
+        assert!(t.contains("(\\330 20) Tj"));
+        assert!(t.contains("(30) Tj"));
     }
 }
