@@ -5,6 +5,7 @@ fn main() {
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "teil_geometrie",
             "skizze_loesen",
+            "ausschnitte_loesen",
             "montage_loecher",
             "vorlage",
             "pdf_exportieren",

@@ -19,6 +19,7 @@ use std::f64::consts::PI;
 
 use crate::form::{FormFehler, Pfad, PfadElement, bogen_mitte, bogen_spanne};
 use crate::geometrie::Punkt;
+use crate::loeser::{self, System};
 use crate::mass::Mm;
 
 /// Höchstzahl Elemente in einer Skizze mit Bedingungen. Der Löser rechnet
@@ -26,13 +27,9 @@ use crate::mass::Mm;
 pub const MAX_ELEMENTE: usize = 200;
 /// Höchstzahl Bedingungen je Skizze.
 pub const MAX_BEDINGUNGEN: usize = 400;
-/// Größte Restabweichung, ab der eine Bedingung als erfüllt gilt (mm bzw.
-/// mm-skaliert bei Winkeln). Weit unter der zentralen Toleranz.
-const LOES_TOLERANZ: f64 = 1e-9;
 /// Winkelbedingungen werden mit dieser Länge (mm) gewichtet, damit sie
 /// neben Längen nicht untergehen.
 const WINKEL_GEWICHT: f64 = 100.0;
-const MAX_SCHRITTE: usize = 100;
 
 /// Ein Maß oder eine geometrische Bedingung.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -498,7 +495,7 @@ impl Gleichung {
     }
 }
 
-fn pruefe_wert(w: Mm) -> Result<f64, SkizzenFehler> {
+pub(crate) fn pruefe_wert(w: Mm) -> Result<f64, SkizzenFehler> {
     let x = w.wert();
     if x > 0.0 && x <= 10_000.0 {
         Ok(x)
@@ -508,7 +505,7 @@ fn pruefe_wert(w: Mm) -> Result<f64, SkizzenFehler> {
 }
 
 /// Vorzeichen, das die gezeichnete Seite festhält (0 zählt als +).
-fn seite(x: f64) -> f64 {
+pub(crate) fn seite(x: f64) -> f64 {
     if x < 0.0 { -1.0 } else { 1.0 }
 }
 
@@ -667,224 +664,6 @@ fn gleichungen(
     Ok(g)
 }
 
-/// Dünn besetzte Jacobi-Matrix: je Gleichung (Variable, Ableitung).
-type Zeilen = Vec<Vec<(usize, f64)>>;
-
-fn jacobi(m: &Modell, g: &[Gleichung], vars: &[Vec<usize>], v: &mut [f64]) -> Zeilen {
-    g.iter()
-        .zip(vars)
-        .map(|(gl, vs)| {
-            vs.iter()
-                .map(|&k| {
-                    // Zentrale Differenz; Schrittweite passend zur Größe.
-                    let alt = v[k];
-                    let h = 1e-6 * alt.abs().max(1.0);
-                    v[k] = alt + h;
-                    let plus = gl.wert(m, v);
-                    v[k] = alt - h;
-                    let minus = gl.wert(m, v);
-                    v[k] = alt;
-                    (k, (plus - minus) / (2.0 * h))
-                })
-                .collect()
-        })
-        .collect()
-}
-
-fn reste(m: &Modell, g: &[Gleichung], v: &[f64]) -> Vec<f64> {
-    g.iter().map(|gl| gl.wert(m, v)).collect()
-}
-
-fn norm(r: &[f64]) -> f64 {
-    r.iter().map(|x| x * x).sum::<f64>().sqrt()
-}
-
-/// Löst (A + λ·I)·y = r für die symmetrische, positiv semidefinite Matrix A
-/// per Cholesky. `None`, wenn die Matrix numerisch nicht positiv ist.
-fn cholesky_loesen(a: &[f64], n: usize, lambda: f64, r: &[f64]) -> Option<Vec<f64>> {
-    let mut l = vec![0.0; n * n];
-    for i in 0..n {
-        for j in 0..=i {
-            let mut s = a[i * n + j];
-            if i == j {
-                s += lambda;
-            }
-            for k in 0..j {
-                s -= l[i * n + k] * l[j * n + k];
-            }
-            if i == j {
-                if s <= 0.0 || !s.is_finite() {
-                    return None;
-                }
-                l[i * n + i] = s.sqrt();
-            } else {
-                l[i * n + j] = s / l[j * n + j];
-            }
-        }
-    }
-    let mut y = r.to_vec();
-    for i in 0..n {
-        for k in 0..i {
-            y[i] -= l[i * n + k] * y[k];
-        }
-        y[i] /= l[i * n + i];
-    }
-    for i in (0..n).rev() {
-        for k in (i + 1)..n {
-            y[i] -= l[k * n + i] * y[k];
-        }
-        y[i] /= l[i * n + i];
-    }
-    Some(y)
-}
-
-/// Gedämpftes Gauß-Newton-Verfahren mit Schritt kleinster Norm: Bei einer
-/// nicht vollständig bestimmten Skizze bewegt sich so nur, was sich
-/// bewegen muss.
-fn loese(m: &Modell, g: &[Gleichung], v: &mut [f64]) -> Result<(), SkizzenFehler> {
-    let anzahl = g.len();
-    if anzahl == 0 {
-        return Ok(());
-    }
-    let vars: Vec<Vec<usize>> = g.iter().map(|gl| gl.variablen(m)).collect();
-    let mut r = reste(m, g, v);
-    let mut lambda_faktor = 1e-12;
-    for _ in 0..MAX_SCHRITTE {
-        if r.iter().all(|x| x.abs() < LOES_TOLERANZ) {
-            return Ok(());
-        }
-        let j = jacobi(m, g, &vars, v);
-        // A = J·Jᵀ (anzahl × anzahl), aus den dünnen Zeilen.
-        let mut a = vec![0.0; anzahl * anzahl];
-        let mut dicht = vec![0.0; m.anzahl];
-        for p in 0..anzahl {
-            for &(k, d) in &j[p] {
-                dicht[k] = d;
-            }
-            for q in 0..=p {
-                let s: f64 = j[q].iter().map(|&(k, d)| d * dicht[k]).sum();
-                a[p * anzahl + q] = s;
-                a[q * anzahl + p] = s;
-            }
-            for &(k, _) in &j[p] {
-                dicht[k] = 0.0;
-            }
-        }
-        let spur = (0..anzahl)
-            .map(|i| a[i * anzahl + i])
-            .fold(0.0f64, f64::max)
-            .max(1e-12);
-        let alt = norm(&r);
-        let mut weiter = false;
-        while lambda_faktor < 1e3 {
-            let Some(y) = cholesky_loesen(&a, anzahl, lambda_faktor * spur, &r) else {
-                lambda_faktor *= 100.0;
-                continue;
-            };
-            // δ = −Jᵀ·y
-            let mut delta = vec![0.0; m.anzahl];
-            for (p, zeile) in j.iter().enumerate() {
-                for &(k, d) in zeile {
-                    delta[k] -= d * y[p];
-                }
-            }
-            let mut schritt = 1.0;
-            while schritt > 1e-3 {
-                let neu: Vec<f64> = v.iter().zip(&delta).map(|(x, d)| x + schritt * d).collect();
-                let r_neu = reste(m, g, &neu);
-                if norm(&r_neu) < alt {
-                    v.copy_from_slice(&neu);
-                    r = r_neu;
-                    weiter = true;
-                    break;
-                }
-                schritt /= 2.0;
-            }
-            if weiter {
-                lambda_faktor = (lambda_faktor / 10.0).max(1e-12);
-                break;
-            }
-            lambda_faktor *= 100.0;
-        }
-        if !weiter {
-            break;
-        }
-    }
-    if r.iter().all(|x| x.abs() < LOES_TOLERANZ * 1e3) {
-        Ok(())
-    } else {
-        Err(SkizzenFehler::Widerspruch)
-    }
-}
-
-/// Rang der Jacobi-Matrix und eine Basis ihres Kerns (die Richtungen, in
-/// die sich die Skizze noch bewegen lässt).
-fn rang_und_kern(j: &Zeilen, spalten: usize) -> (usize, Vec<Vec<f64>>) {
-    let zeilen = j.len();
-    let mut a = vec![0.0; zeilen * spalten];
-    for (p, z) in j.iter().enumerate() {
-        let groesste = z.iter().map(|&(_, d)| d.abs()).fold(0.0f64, f64::max);
-        if groesste < 1e-12 {
-            continue;
-        }
-        for &(k, d) in z {
-            a[p * spalten + k] = d / groesste;
-        }
-    }
-    // Reduzierte Stufenform mit Spaltenpivotsuche.
-    let mut pivots: Vec<usize> = Vec::new();
-    let mut zeile = 0;
-    for s in 0..spalten {
-        if zeile >= zeilen {
-            break;
-        }
-        let (best, wert) = (zeile..zeilen)
-            .map(|p| (p, a[p * spalten + s].abs()))
-            .fold((zeile, 0.0), |b, x| if x.1 > b.1 { x } else { b });
-        if wert < 1e-7 {
-            continue;
-        }
-        for k in 0..spalten {
-            a.swap(zeile * spalten + k, best * spalten + k);
-        }
-        let p = a[zeile * spalten + s];
-        for k in 0..spalten {
-            a[zeile * spalten + k] /= p;
-        }
-        for q in 0..zeilen {
-            if q == zeile {
-                continue;
-            }
-            let f = a[q * spalten + s];
-            if f.abs() < 1e-15 {
-                continue;
-            }
-            for k in 0..spalten {
-                a[q * spalten + k] -= f * a[zeile * spalten + k];
-            }
-        }
-        pivots.push(s);
-        zeile += 1;
-    }
-    let rang = pivots.len();
-    let mut ist_pivot = vec![false; spalten];
-    for &s in &pivots {
-        ist_pivot[s] = true;
-    }
-    let kern = (0..spalten)
-        .filter(|&f| !ist_pivot[f])
-        .map(|f| {
-            let mut x = vec![0.0; spalten];
-            x[f] = 1.0;
-            for (z, &s) in pivots.iter().enumerate() {
-                x[s] = -a[z * spalten + f];
-            }
-            x
-        })
-        .collect();
-    (rang, kern)
-}
-
 /// Schreibt die gelösten Werte zurück in einen Pfad.
 fn pfad_aus(m: &Modell, alt: &Pfad, v: &[f64]) -> Result<Pfad, SkizzenFehler> {
     let mut elemente = Vec::with_capacity(alt.elemente.len());
@@ -940,7 +719,14 @@ pub fn loesen(
     }
     let (m, mut v) = Modell::neu(pfad, geschlossen)?;
     let g = gleichungen(&m, &v, bedingungen)?;
-    loese(&m, &g, &mut v)?;
+    let system = System {
+        anzahl: m.anzahl,
+        variablen: g.iter().map(|gl| gl.variablen(&m)).collect(),
+        wert: Box::new(|i, v| g[i].wert(&m, v)),
+    };
+    if !loeser::loese(&system, &mut v) {
+        return Err(SkizzenFehler::Widerspruch);
+    }
     let neu = pfad_aus(&m, pfad, &v)?;
     // Die Form muss sich noch bauen lassen (z. B. kein unmöglicher Bogen).
     if geschlossen {
@@ -949,9 +735,8 @@ pub fn loesen(
         neu.linienzug()?;
     }
 
-    let vars: Vec<Vec<usize>> = g.iter().map(|gl| gl.variablen(&m)).collect();
-    let j = jacobi(&m, &g, &vars, &mut v);
-    let (rang, kern) = rang_und_kern(&j, m.anzahl);
+    let j = system.jacobi(&mut v);
+    let (rang, kern) = loeser::rang_und_kern(&j, m.anzahl);
     let frei = |k: usize| kern.iter().any(|x| x[k].abs() > 1e-6);
     let freie_punkte: Vec<bool> = m
         .punkt_var
@@ -1001,7 +786,7 @@ pub struct Symbol {
 }
 
 /// Abstand der Maßlinie von der Kante (mm).
-const MASS_ABSTAND: f64 = 8.0;
+pub(crate) const MASS_ABSTAND: f64 = 8.0;
 /// Weitere Maße in dieselbe Richtung stapeln sich in diesem Abstand.
 const MASS_STAFFEL: f64 = 7.0;
 
@@ -1027,7 +812,7 @@ fn lesbar(w: f64) -> f64 {
 
 /// Maß zwischen zwei Punkten entlang `richtung`, um `abstand` in Richtung
 /// `normale` versetzt.
-fn mass_zwischen(
+pub(crate) fn mass_zwischen(
     bedingung: Option<usize>,
     a: Punkt,
     b: Punkt,

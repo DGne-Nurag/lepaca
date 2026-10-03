@@ -4,13 +4,14 @@
 //! hier im Kern berechnet und validiert. Dateien öffnet und schreibt nur
 //! dieser Teil, die Oberfläche bekommt keinen Dateizugriff (ADR 0002).
 
+use lepaca_core::ausschnitt::{self, Abstandsmass, Ausschnitt, AusschnittFehler, Bezug, Richtung};
 use lepaca_core::eisen::Eisenart;
 use lepaca_core::form::{Form, FormFehler, Pfad, PfadElement, TPocketNaehte};
 use lepaca_core::geometrie::{KonturFehler, Punkt};
 use lepaca_core::kachelung::{self, KachelFehler, Papier};
 use lepaca_core::mass::Mm;
 use lepaca_core::muster::{
-    self, Montage, Musterteil, Naht, Nahtkanten, StichOderForm, Teil, TeilForm,
+    self, Montage, Musterteil, Naht, Nahtkanten, StichOderForm, Teil, TeilForm, Umriss,
 };
 use lepaca_core::skizze::{self, Bedingung, SkizzenFehler};
 use lepaca_core::stichlinie::{Eckausrichtung, Einstellung, StichFehler};
@@ -106,6 +107,53 @@ pub enum FormDaten {
     },
 }
 
+/// Wovon aus ein Abstand gemessen wird.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BezugDaten {
+    Mitte,
+    Rand,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RichtungDaten {
+    Direkt,
+    Waagerecht,
+    Senkrecht,
+}
+
+/// Maß, das einen Ausschnitt im Teil festlegt; siehe
+/// `lepaca_core::ausschnitt::Abstandsmass`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "art", rename_all = "camelCase", deny_unknown_fields)]
+pub enum AbstandDaten {
+    Kante {
+        ausschnitt: usize,
+        kante: usize,
+        bezug: BezugDaten,
+        wert: f64,
+    },
+    Zwischen {
+        a: usize,
+        b: usize,
+        richtung: RichtungDaten,
+        bezug: BezugDaten,
+        wert: f64,
+    },
+}
+
+/// Eine Form, die aus dem Teil ausgestanzt wird. Position relativ zum Teil.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AusschnittDaten {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub form: FormDaten,
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StichDaten {
@@ -136,6 +184,12 @@ pub struct TeilDaten {
     pub stiche: Option<StichDaten>,
     #[serde(default)]
     pub montage: Option<MontageDaten>,
+    /// Ausgestanzte Formen.
+    #[serde(default)]
+    pub ausschnitte: Vec<AusschnittDaten>,
+    /// Maße, die die Ausschnitte festlegen.
+    #[serde(default)]
+    pub abstandsmasse: Vec<AbstandDaten>,
 }
 
 /// Ein Maß zum Zeichnen (Koordinaten relativ zum Teil).
@@ -177,6 +231,19 @@ pub struct Geometrie {
     pub masse: Vec<MassDaten>,
     /// Symbole der geometrischen Bedingungen.
     pub symbole: Vec<SymbolDaten>,
+    /// Umrisse der Ausschnitte (geschlossen).
+    pub ausschnitte: Vec<Vec<[f64; 2]>>,
+    /// Gelöste Position je Ausschnitt (relativ zum Teil).
+    pub ausschnitt_lagen: Vec<[f64; 2]>,
+    /// Mittelpunkt je Ausschnitt (relativ zum Teil).
+    pub ausschnitt_mitten: Vec<[f64; 2]>,
+    /// Je Ausschnitt, ob er sich noch verschieben lässt.
+    pub ausschnitt_frei: Vec<bool>,
+    /// Gerade Kanten des Teils für Abstandsmaße (`null`: gebogen).
+    pub gerade_kanten: Vec<Option<[[f64; 2]; 2]>>,
+    /// Stichlöcher der eigenen Naht, die in einem Ausschnitt oder zu nah
+    /// an seinem Rand liegen.
+    pub loecher_am_ausschnitt: usize,
 }
 
 /// Ein Stück Stichlinie zum Zeichnen.
@@ -218,6 +285,21 @@ fn fehlercode(f: StichOderForm) -> String {
     match f {
         StichOderForm::Form(f) => fehlercode_form(f),
         StichOderForm::Stich(f) => fehlercode_stich(f),
+        StichOderForm::Ausschnitt(f) => fehlercode_ausschnitt(f),
+    }
+}
+
+fn fehlercode_ausschnitt(f: AusschnittFehler) -> String {
+    match f {
+        AusschnittFehler::ZuGross => "ausschnitt.zuGross".into(),
+        AusschnittFehler::NichtImTeil => "ausschnitt.nichtImTeil".into(),
+        AusschnittFehler::Ueberschneiden => "ausschnitt.ueberschneiden".into(),
+        AusschnittFehler::OffeneLinie => "ausschnitt.offeneLinie".into(),
+        AusschnittFehler::Verweis => "ausschnitt.verweis".into(),
+        AusschnittFehler::Unpassend => "ausschnitt.unpassend".into(),
+        AusschnittFehler::UngueltigerWert => "ausschnitt.wert".into(),
+        AusschnittFehler::Widerspruch => "ausschnitt.widerspruch".into(),
+        AusschnittFehler::Form(f) => fehlercode_form(f),
     }
 }
 
@@ -415,14 +497,12 @@ fn bedingungen_aus(b: &[BedingungDaten]) -> Result<Vec<Bedingung>, String> {
     b.iter().map(bedingung_aus).collect()
 }
 
-/// Wandelt ein Teil aus der Oberfläche in ein Teil des Kerns.
-fn teil_aus(t: &TeilDaten) -> Result<Musterteil, String> {
-    if !(t.x.is_finite() && t.y.is_finite()) || t.x.abs() > 1e5 || t.y.abs() > 1e5 {
-        return Err("form.position".into());
-    }
+/// Eine Form aus der Oberfläche, dazu die Nahtkanten und Bedingungen der
+/// Skizze.
+fn form_aus(f: &FormDaten) -> Result<(TeilForm, Nahtkanten, Vec<Bedingung>), String> {
     let mut kanten = Nahtkanten::Ringsum;
     let mut bedingungen = Vec::new();
-    let form = match &t.form {
+    let form = match f {
         &FormDaten::Rechteck {
             breite,
             hoehe,
@@ -482,6 +562,129 @@ fn teil_aus(t: &TeilDaten) -> Result<Musterteil, String> {
             }
         }
     };
+    Ok((form, kanten, bedingungen))
+}
+
+fn bezug(b: BezugDaten) -> Bezug {
+    match b {
+        BezugDaten::Mitte => Bezug::Mitte,
+        BezugDaten::Rand => Bezug::Rand,
+    }
+}
+
+fn abstand_aus(a: &AbstandDaten) -> Result<Abstandsmass, String> {
+    Ok(match *a {
+        AbstandDaten::Kante {
+            ausschnitt,
+            kante,
+            bezug: b,
+            wert,
+        } => Abstandsmass::ZurKante {
+            ausschnitt,
+            kante,
+            bezug: bezug(b),
+            wert: mm(wert, "ausschnitt.wert")?,
+        },
+        AbstandDaten::Zwischen {
+            a,
+            b,
+            richtung,
+            bezug: bz,
+            wert,
+        } => Abstandsmass::Zwischen {
+            a,
+            b,
+            richtung: match richtung {
+                RichtungDaten::Direkt => Richtung::Direkt,
+                RichtungDaten::Waagerecht => Richtung::Waagerecht,
+                RichtungDaten::Senkrecht => Richtung::Senkrecht,
+            },
+            bezug: bezug(bz),
+            wert: mm(wert, "ausschnitt.wert")?,
+        },
+    })
+}
+
+fn abstand_nach(a: &Abstandsmass) -> AbstandDaten {
+    let bezug = |b: Bezug| match b {
+        Bezug::Mitte => BezugDaten::Mitte,
+        Bezug::Rand => BezugDaten::Rand,
+    };
+    match *a {
+        Abstandsmass::ZurKante {
+            ausschnitt,
+            kante,
+            bezug: b,
+            wert,
+        } => AbstandDaten::Kante {
+            ausschnitt,
+            kante,
+            bezug: bezug(b),
+            wert: wert.wert(),
+        },
+        Abstandsmass::Zwischen {
+            a,
+            b,
+            richtung,
+            bezug: bz,
+            wert,
+        } => AbstandDaten::Zwischen {
+            a,
+            b,
+            richtung: match richtung {
+                Richtung::Direkt => RichtungDaten::Direkt,
+                Richtung::Waagerecht => RichtungDaten::Waagerecht,
+                Richtung::Senkrecht => RichtungDaten::Senkrecht,
+            },
+            bezug: bezug(bz),
+            wert: wert.wert(),
+        },
+    }
+}
+
+fn ausschnitte_aus(a: &[AusschnittDaten]) -> Result<Vec<Ausschnitt>, String> {
+    if a.len() > ausschnitt::MAX_AUSSCHNITTE {
+        return Err("ausschnitt.zuGross".into());
+    }
+    a.iter()
+        .map(|a| {
+            if !(a.x.is_finite() && a.y.is_finite()) || a.x.abs() > 1e5 || a.y.abs() > 1e5 {
+                return Err("form.position".to_string());
+            }
+            match form_aus(&a.form)?.0 {
+                TeilForm::Geschlossen(form) => Ok(Ausschnitt {
+                    form,
+                    position: Punkt::neu(a.x, a.y),
+                }),
+                TeilForm::Offen(_) => Err("ausschnitt.offeneLinie".to_string()),
+            }
+        })
+        .collect()
+}
+
+/// Wandelt ein Teil aus der Oberfläche in ein Teil des Kerns. Die
+/// Ausschnitte liegen danach so, wie ihre Maße es verlangen.
+fn teil_aus(t: &TeilDaten) -> Result<Musterteil, String> {
+    if !(t.x.is_finite() && t.y.is_finite()) || t.x.abs() > 1e5 || t.y.abs() > 1e5 {
+        return Err("form.position".into());
+    }
+    let (form, kanten, bedingungen) = form_aus(&t.form)?;
+    let mut ausschnitte = ausschnitte_aus(&t.ausschnitte)?;
+    if t.abstandsmasse.len() > ausschnitt::MAX_MASSE {
+        return Err("ausschnitt.zuGross".into());
+    }
+    let abstandsmasse = t
+        .abstandsmasse
+        .iter()
+        .map(abstand_aus)
+        .collect::<Result<Vec<_>, _>>()?;
+    if let (TeilForm::Geschlossen(f), false) = (&form, abstandsmasse.is_empty()) {
+        let l =
+            ausschnitt::loesen(f, &ausschnitte, &abstandsmasse).map_err(fehlercode_ausschnitt)?;
+        for (a, p) in ausschnitte.iter_mut().zip(l.positionen) {
+            a.position = p;
+        }
+    }
     let naht = match &t.stiche {
         Some(d) => Some(Naht {
             einstellung: Einstellung {
@@ -520,8 +723,10 @@ fn teil_aus(t: &TeilDaten) -> Result<Musterteil, String> {
             position: Punkt::neu(t.x, t.y),
             naht,
             montage,
+            ausschnitte,
         },
         bedingungen,
+        abstandsmasse,
     })
 }
 
@@ -586,6 +791,29 @@ fn teil_nach(m: &Musterteil) -> TeilDaten {
         form,
         x: t.position.x,
         y: t.position.y,
+        ausschnitte: t
+            .ausschnitte
+            .iter()
+            .map(|a| AusschnittDaten {
+                name: None,
+                form: teil_nach(&Musterteil {
+                    name: String::new(),
+                    teil: Teil {
+                        form: TeilForm::Geschlossen(a.form.clone()),
+                        position: a.position,
+                        naht: None,
+                        montage: None,
+                        ausschnitte: Vec::new(),
+                    },
+                    bedingungen: Vec::new(),
+                    abstandsmasse: Vec::new(),
+                })
+                .form,
+                x: a.position.x,
+                y: a.position.y,
+            })
+            .collect(),
+        abstandsmasse: m.abstandsmasse.iter().map(abstand_nach).collect(),
         stiche: t.naht.as_ref().map(|n| StichDaten {
             kantenabstand: n.einstellung.kantenabstand.wert(),
             lochabstand: n.einstellung.lochabstand.wert(),
@@ -631,16 +859,45 @@ pub fn geometrie(daten: &TeilDaten) -> Result<Geometrie, String> {
         stichfehler: None,
         masse: Vec::new(),
         symbole: Vec::new(),
+        ausschnitte: Vec::new(),
+        ausschnitt_lagen: t.ausschnitte.iter().map(|a| feld(a.position)).collect(),
+        ausschnitt_mitten: t
+            .ausschnitte
+            .iter()
+            .map(|a| feld(ausschnitt::mitte(a).unwrap_or(a.position)))
+            .collect(),
+        ausschnitt_frei: vec![true; t.ausschnitte.len()],
+        gerade_kanten: Vec::new(),
+        loecher_am_ausschnitt: 0,
     };
+    let d = t.position;
+    let verschieben = |q: [f64; 2]| [q[0] + d.x, q[1] + d.y];
+    if let Umriss::Teil { ausschnitte, .. } = &u {
+        g.ausschnitte = ausschnitte
+            .iter()
+            .map(|k| k.punkte().iter().map(|p| feld(*p)).collect())
+            .collect();
+    }
+    if let TeilForm::Geschlossen(f) = &t.form {
+        g.gerade_kanten = ausschnitt::gerade_kanten(f)
+            .iter()
+            .map(|k| k.map(|(a, e)| [verschieben(feld(a)), verschieben(feld(e))]))
+            .collect();
+        // Die Lagen sind schon gelöst; das zeigt nur, was noch frei ist.
+        if let Ok(l) = ausschnitt::loesen(f, &t.ausschnitte, &mt.abstandsmasse) {
+            g.ausschnitt_frei = l.frei;
+        }
+    }
     // Maße relativ zum Teil: Skizzen rechnen ohnehin relativ zum
     // Bezugspunkt, Grundformen haben ihre linke obere Ecke dort.
-    let (masse, symbole) = match &t.form {
+    let (mut masse, symbole) = match &t.form {
         TeilForm::Geschlossen(Form::Pfad(p)) => skizze::zeichnung(p, true, &mt.bedingungen),
         TeilForm::Offen(p) => skizze::zeichnung(p, false, &mt.bedingungen),
         TeilForm::Geschlossen(f) => (skizze::form_masse(f), Vec::new()),
     };
-    let d = t.position;
-    let verschieben = |q: [f64; 2]| [q[0] + d.x, q[1] + d.y];
+    if let TeilForm::Geschlossen(f) = &t.form {
+        masse.extend(ausschnitt::zeichnung(f, &t.ausschnitte, &mt.abstandsmasse));
+    }
     g.masse = masse
         .iter()
         .map(|m| {
@@ -684,6 +941,7 @@ pub fn geometrie(daten: &TeilDaten) -> Result<Geometrie, String> {
                 .iter()
                 .map(|a| a.lochabstand.wert())
                 .collect();
+            g.loecher_am_ausschnitt = muster::loecher_am_ausschnitt(&u, &reihe, &loch);
         }
         Some(Err(f)) => g.stichfehler = Some(fehlercode_stich(f)),
         None => {}
@@ -736,6 +994,41 @@ fn skizze_loesen(form: FormDaten) -> Result<SkizzenErgebnis, String> {
     skizze(&form)
 }
 
+/// Ergebnis für die Ausschnitte eines Teils.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AusschnittErgebnis {
+    /// Gelöste Position je Ausschnitt (relativ zum Teil).
+    pub positionen: Vec<[f64; 2]>,
+    pub freiheitsgrade: usize,
+    pub ueberbestimmt: bool,
+    pub frei: Vec<bool>,
+}
+
+/// Richtet die Ausschnitte eines Teils nach ihren Maßen aus und prüft,
+/// dass sie danach noch ganz im Teil liegen.
+pub fn ausschnitte(teil: &TeilDaten) -> Result<AusschnittErgebnis, String> {
+    let mt = teil_aus(teil)?;
+    let t = &mt.teil;
+    let TeilForm::Geschlossen(f) = &t.form else {
+        return Err("ausschnitt.offeneLinie".into());
+    };
+    t.umriss().map_err(fehlercode)?;
+    let l =
+        ausschnitt::loesen(f, &t.ausschnitte, &mt.abstandsmasse).map_err(fehlercode_ausschnitt)?;
+    Ok(AusschnittErgebnis {
+        positionen: l.positionen.iter().map(|p| feld(*p)).collect(),
+        freiheitsgrade: l.freiheitsgrade,
+        ueberbestimmt: l.ueberbestimmt,
+        frei: l.frei,
+    })
+}
+
+#[tauri::command]
+fn ausschnitte_loesen(teil: TeilDaten) -> Result<AusschnittErgebnis, String> {
+    ausschnitte(&teil)
+}
+
 /// Übernommene Löcher eines Teils, relativ zu seiner Lage im Muster.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -765,6 +1058,7 @@ pub fn montage(teile: &[TeilDaten]) -> Result<Vec<MontageErgebnis>, String> {
                 position: Punkt::neu(0.0, 0.0),
                 naht: None,
                 montage: None,
+                ausschnitte: Vec::new(),
             },
         })
         .collect();
@@ -917,6 +1211,7 @@ pub fn starten() {
         .invoke_handler(tauri::generate_handler![
             teil_geometrie,
             skizze_loesen,
+            ausschnitte_loesen,
             montage_loecher,
             vorlage,
             pdf_exportieren
@@ -999,6 +1294,8 @@ mod tests {
                 ecke: "ein".into(),
             }),
             montage: None,
+            ausschnitte: Vec::new(),
+            abstandsmasse: Vec::new(),
         }
     }
 
@@ -1165,6 +1462,79 @@ mod tests {
             "bedingungen":[{"art":"horizontal","kante":0},{"art":"abstandY","a":0,"b":1,"wert":5}]}"#;
         let f: FormDaten = serde_json::from_str(json).unwrap();
         assert_eq!(skizze(&f), Err("skizze.widerspruch".to_string()));
+    }
+
+    /// Viereck 100 × 60 mm mit einem Kreis (Ø 20 mm), grob aufgelegt, und
+    /// den Abständen aus dem JSON.
+    fn viereck_mit_loch(abstaende: &str) -> TeilDaten {
+        let json = format!(
+            r#"{{"form":{{"art":"rechteck","breite":100,"hoehe":60,"eckenradius":0}},
+                "x":10,"y":10,"stiche":null,
+                "ausschnitte":[{{"form":{{"art":"kreis","durchmesser":20}},"x":17,"y":12}}],
+                "abstandsmasse":{abstaende}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn ein_kreis_wird_mit_zwei_abstaenden_genau_im_viereck_ausgestanzt() {
+        // Kreismitte 30 mm von links, Kreisrand 15 mm von oben.
+        let t = viereck_mit_loch(
+            r#"[{"art":"kante","ausschnitt":0,"kante":3,"bezug":"mitte","wert":30},
+                {"art":"kante","ausschnitt":0,"kante":0,"bezug":"rand","wert":15}]"#,
+        );
+        let e = ausschnitte(&t).unwrap();
+        assert_eq!(e.freiheitsgrade, 0);
+        // Position ist die linke obere Ecke des Kreises.
+        assert!((e.positionen[0][0] - 20.0).abs() < 1e-6);
+        assert!((e.positionen[0][1] - 15.0).abs() < 1e-6);
+        let g = geometrie(&t).unwrap();
+        assert_eq!(g.ausschnitte.len(), 1);
+        assert_eq!(g.ausschnitt_frei, vec![false]);
+        // Die Umrisse sind relativ zum Teil, die Kanten im Muster.
+        let xs: Vec<f64> = g.ausschnitte[0].iter().map(|p| p[0]).collect();
+        let min = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!((min - 30.0).abs() < 0.02, "linker Rand bei {min}");
+        assert_eq!(g.gerade_kanten.len(), 4);
+        assert!(g.masse.iter().any(|m| m.text == "Ø 20"));
+        assert!(g.masse.iter().any(|m| m.text == "15"));
+    }
+
+    #[test]
+    fn ein_abstand_der_den_kreis_aus_dem_teil_schiebt_wird_abgelehnt() {
+        let t = viereck_mit_loch(
+            r#"[{"art":"kante","ausschnitt":0,"kante":3,"bezug":"mitte","wert":95}]"#,
+        );
+        assert_eq!(ausschnitte(&t), Err("ausschnitt.nichtImTeil".to_string()));
+        assert_eq!(geometrie(&t), Err("ausschnitt.nichtImTeil".to_string()));
+    }
+
+    #[test]
+    fn eine_offene_linie_als_ausschnitt_wird_abgewiesen() {
+        let mut t = viereck_mit_loch("[]");
+        t.ausschnitte[0].form = FormDaten::Pfad {
+            start: [0.0, 0.0],
+            elemente: vec![ElementDaten::Linie { ziel: [5.0, 5.0] }],
+            geschlossen: false,
+            bedingungen: Vec::new(),
+            naehte: None,
+        };
+        assert_eq!(geometrie(&t), Err("ausschnitt.offeneLinie".to_string()));
+    }
+
+    #[test]
+    fn ausschnitte_kommen_mit_ins_pdf() {
+        let t = viereck_mit_loch(
+            r#"[{"art":"kante","ausschnitt":0,"kante":3,"bezug":"mitte","wert":30}]"#,
+        );
+        let druck = DruckDaten {
+            papier: "a4".into(),
+            rand: 10.0,
+            klebekante: 10.0,
+        };
+        let (inhalt, _) = pdf(&[t], &druck).unwrap();
+        let text = String::from_utf8_lossy(&inhalt);
+        assert!(text.contains("(30) Tj"));
     }
 
     #[cfg(target_os = "linux")]

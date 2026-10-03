@@ -60,6 +60,25 @@ export type Form =
 
 export type PfadForm = Extract<Form, { art: "pfad" }>;
 
+/** Wovon aus ein Abstand gemessen wird: Mittelpunkt oder Rand (Umfang). */
+export type Bezug = "mitte" | "rand";
+export type Richtung = "direkt" | "waagerecht" | "senkrecht";
+
+/** Eine Form, die aus dem Teil ausgestanzt wird (Loch, Fenster). Position
+ * der Form relativ zum Teil, mm. */
+export interface Ausschnitt {
+  name: string;
+  form: Form;
+  x: number;
+  y: number;
+}
+
+/** Maß, das einen Ausschnitt im Teil festlegt. Kanten zählen wie die
+ * geraden Kanten des Teils (Rechteck: oben, rechts, unten, links). */
+export type Abstandsmass =
+  | { art: "kante"; ausschnitt: number; kante: number; bezug: Bezug; wert: number }
+  | { art: "zwischen"; a: number; b: number; richtung: Richtung; bezug: Bezug; wert: number };
+
 /** Lage im fertigen Stück und Nähschritt. */
 export interface Montage {
   x: number;
@@ -85,6 +104,10 @@ export interface Teil {
   /** Lage im Zusammenbau; Nähte gehen durch alle Lagen, die beim Nähen
    * schon da sind. */
   montage?: Montage | null;
+  /** Ausgestanzte Formen. */
+  ausschnitte?: Ausschnitt[];
+  /** Maße, die die Ausschnitte festlegen. */
+  abstandsmasse?: Abstandsmass[];
 }
 
 export interface Druck {

@@ -3,10 +3,12 @@
 //! Der Kern ist rein: keine Abhängigkeit zu Oberfläche, Dateisystem oder
 //! Netzwerk (Playbook 03). Alle Längen sind Millimeter.
 
+pub mod ausschnitt;
 pub mod eisen;
 pub mod form;
 pub mod geometrie;
 pub mod kachelung;
+pub(crate) mod loeser;
 pub mod mass;
 pub mod muster;
 pub mod skizze;

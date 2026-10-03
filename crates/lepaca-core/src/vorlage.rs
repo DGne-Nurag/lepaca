@@ -410,6 +410,7 @@ pub fn bifold_mit(m: BifoldMasse) -> Result<Vorlage, VorlagenFehler> {
             position: p(0.0, 0.0),
             schritt: 5,
         }),
+        ausschnitte: Vec::new(),
     };
     let a = ableiten(&m, &aussen)?;
     let fach_breite = fachbreite(&m, &a);
@@ -420,6 +421,7 @@ pub fn bifold_mit(m: BifoldMasse) -> Result<Vorlage, VorlagenFehler> {
         name: "Außenleder".into(),
         teil: aussen,
         bedingungen: aussen_bed.clone(),
+        abstandsmasse: Vec::new(),
     }];
 
     // Futter: gleicher Umriss, keine eigene Naht; es bekommt die Löcher
@@ -435,8 +437,10 @@ pub fn bifold_mit(m: BifoldMasse) -> Result<Vorlage, VorlagenFehler> {
                 position: p(0.0, 0.0),
                 schritt: 0,
             }),
+            ausschnitte: Vec::new(),
         },
         bedingungen: aussen_bed,
+        abstandsmasse: Vec::new(),
     });
 
     // T-Fächer: nur der Steg wird eigens genäht (verdeckt vom nächsten
@@ -468,8 +472,10 @@ pub fn bifold_mit(m: BifoldMasse) -> Result<Vorlage, VorlagenFehler> {
                         position: p(x_montage, y),
                         schritt: k as u32 + 1,
                     }),
+                    ausschnitte: Vec::new(),
                 },
                 bedingungen: Vec::new(),
+                abstandsmasse: Vec::new(),
             });
         }
     }
@@ -492,8 +498,10 @@ pub fn bifold_mit(m: BifoldMasse) -> Result<Vorlage, VorlagenFehler> {
                     position: p(x_montage, a.faecher_y[2]),
                     schritt: 3,
                 }),
+                ausschnitte: Vec::new(),
             },
             bedingungen: bed,
+            abstandsmasse: Vec::new(),
         });
     }
 
@@ -513,8 +521,10 @@ pub fn bifold_mit(m: BifoldMasse) -> Result<Vorlage, VorlagenFehler> {
                     position: montage,
                     schritt: 4,
                 }),
+                ausschnitte: Vec::new(),
             },
             bedingungen: bed,
+            abstandsmasse: Vec::new(),
         });
     }
 
@@ -554,6 +564,7 @@ pub fn bifold_abgeleitet(m: BifoldMasse) -> Result<BifoldAbgeleitet, VorlagenFeh
         position: p(0.0, 0.0),
         naht: Some(naht(&m, Nahtkanten::Pfad(randnaht))),
         montage: None,
+        ausschnitte: Vec::new(),
     };
     ableiten(&m, &aussen)
 }

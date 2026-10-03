@@ -2,6 +2,7 @@
 
 import { Ansicht, lage, PX_PRO_MM, type Darstellung, type Entwurf, type Vorschau } from "./ansicht";
 import {
+  ausschnitteLoesen,
   enthaelt,
   formFehler,
   montageAktualisieren,
@@ -23,6 +24,9 @@ import {
   neuesMuster,
   neueTPocket,
   Verlauf,
+  type Abstandsmass,
+  type Ausschnitt,
+  type Bezug,
   type Ecke,
   type Eisen,
   type Bedingung,
@@ -35,6 +39,7 @@ import {
 } from "./modell";
 import { abstandZuLinie, auf45Grad, bogenAusWoelbung, kantenLaenge, kantePunkte } from "./pfad";
 import { fehlertext, leseZahl, t, zahl, type TextSchluessel } from "./texte";
+import type { Geometrie } from "./kern";
 
 type Werkzeug = "auswahl" | "hand" | "bemassen" | "rechteck" | "kreis" | "ellipse" | "tpocket" | Stift;
 /** Werkzeuge, die Stück für Stück einen Pfad zeichnen. */
@@ -87,11 +92,21 @@ let zusammenbau = false;
 interface SkizzenWahl {
   kanten: number[];
   punkte: number[];
+  /** Gewählte Ausschnitte (für Abstandsmaße). */
+  ausschnitte: number[];
 }
-let skizzenWahl: SkizzenWahl = { kanten: [], punkte: [] };
-let skizzenHover: { kante: number | null; punkt: number | null } = { kante: null, punkt: null };
+interface Treffer {
+  kante: number | null;
+  punkt: number | null;
+  ausschnitt: number | null;
+}
+const leereWahl = (): SkizzenWahl => ({ kanten: [], punkte: [], ausschnitte: [] });
+const keinTreffer = (): Treffer => ({ kante: null, punkt: null, ausschnitt: null });
+let skizzenWahl: SkizzenWahl = leereWahl();
+let skizzenHover: Treffer = keinTreffer();
 /** Maß, dessen Feld nach dem Neuaufbau den Fokus bekommt. */
 let fokusBedingung: number | null = null;
+let fokusAbstand: number | null = null;
 
 const muster = (): Muster => verlauf.muster;
 const gewaehlt = (): Teil | undefined => muster().teile.find((x) => x.id === auswahl);
@@ -195,14 +210,16 @@ function darstellung(): Darstellung {
   const g = gewaehlt();
   const f = g?.form;
   const skizze =
-    werkzeug === "bemassen" && g && f?.art === "pfad" && !zusammenbau
+    werkzeug === "bemassen" && g && f && bemassbar(g) && !zusammenbau
       ? {
           teil: g.id,
           kanten: skizzenWahl.kanten,
           punkte: skizzenWahl.punkte,
           hoverKante: skizzenHover.kante,
           hoverPunkt: skizzenHover.punkt,
-          freieKanten: skizzeSofort(f)?.freieKanten ?? null,
+          freieKanten: f.art === "pfad" ? (skizzeSofort(f)?.freieKanten ?? null) : null,
+          ausschnitte: skizzenWahl.ausschnitte,
+          hoverAusschnitt: skizzenHover.ausschnitt,
         }
       : null;
   return { masse: zeigeMasse, zusammenbau, skizze };
@@ -460,8 +477,8 @@ function werkzeugWaehlen(w: Werkzeug): void {
     pfadEntwurf.griff = [0, 0];
   }
   werkzeug = w;
-  skizzenWahl = { kanten: [], punkte: [] };
-  skizzenHover = { kante: null, punkt: null };
+  skizzenWahl = leereWahl();
+  skizzenHover = keinTreffer();
   for (const [id, b] of werkzeugKnoepfe) b.setAttribute("aria-pressed", String(id === w));
   canvas.dataset["werkzeug"] = w;
   stiftMeldung();
@@ -603,9 +620,12 @@ function eigenschaftenAktualisieren(): void {
   const g = gewaehlt();
   if (g) eigenschaften.append(...teilFelder(g));
   else eigenschaften.append(...musterFelder());
-  if (fokusBedingung !== null) {
-    const feld = eigenschaften.querySelector<HTMLInputElement>(`[data-bedingung="${fokusBedingung}"] input`);
+  if (fokusBedingung !== null || fokusAbstand !== null) {
+    const feld = eigenschaften.querySelector<HTMLInputElement>(
+      fokusBedingung !== null ? `[data-bedingung="${fokusBedingung}"] input` : `[data-abstand="${fokusAbstand}"] input`,
+    );
     fokusBedingung = null;
+    fokusAbstand = null;
     if (feld) {
       feld.focus();
       feld.select();
@@ -650,6 +670,7 @@ function teilFelder(g: Teil): HTMLElement[] {
     zahlFeld(t("teil.x"), g.x, (x) => aendern(() => (g.x = x))),
     zahlFeld(t("teil.y"), g.y, (y) => aendern(() => (g.y = y))),
   );
+  felder.push(...ausschnittFelder(g), ...ausstanzenFelder(g));
 
   // Naht
   const anId = `feld-${++feldNummer}`;
@@ -710,6 +731,9 @@ function teilFelder(g: Teil): HTMLElement[] {
       felder.push(el("p", { class: "meldung" }, t("naht.info", { n: geo.loecher.length, e: geo.ecklocher })));
       const abweichend = [...new Set(geo.abstaende.filter((a) => Math.abs(a - n.lochabstand) >= 0.005).map((a) => zahl(a)))];
       if (abweichend.length > 0) felder.push(el("p", { class: "meldung" }, t("naht.angepasst", { a: abweichend.join(" / ") })));
+      if (geo.loecherAmAusschnitt > 0) {
+        felder.push(el("p", { class: "meldung fehler", role: "alert" }, t("naht.amAusschnitt", { n: geo.loecherAmAusschnitt })));
+      }
     }
   }
 
@@ -862,6 +886,8 @@ function winkelZwischen(f: PfadForm, a: number, b: number): number {
 /** Bedingungen, die zur Auswahl passen, mit den gezeichneten Werten. */
 function moeglicheBedingungen(f: PfadForm, w: SkizzenWahl): { text: TextSchluessel; b: Bedingung }[] {
   const aus: { text: TextSchluessel; b: Bedingung }[] = [];
+  // Mit einem Ausschnitt in der Wahl geht es um Abstandsmaße.
+  if (w.ausschnitte.length > 0) return aus;
   const runde = (x: number) => Math.round(x * 100) / 100;
   const punkte = pfadPunkte(f);
   if (w.kanten.length === 1 && w.punkte.length === 0) {
@@ -950,14 +976,14 @@ function skizzenFelder(g: Teil, f: PfadForm): HTMLElement[] {
   } else {
     const moeglich = moeglicheBedingungen(f, skizzenWahl);
     if (moeglich.length === 0) {
-      felder.push(el("p", { class: "meldung" }, t("skizze.waehlen")));
+      if (skizzenWahl.ausschnitte.length === 0) felder.push(el("p", { class: "meldung" }, t("skizze.waehlen")));
     } else {
       const zeile = el("div", { class: "knopfzeile knopfzeile-eng bedingungen-knoepfe" });
       for (const m of moeglich) {
         const b = el("button", { type: "button" }, t(m.text));
         b.addEventListener("click", () => {
           const neu = [...f.bedingungen, m.b];
-          skizzenWahl = { kanten: [], punkte: [] };
+          skizzenWahl = leereWahl();
           void skizzeSetzen(g, neu, istMass(m.b) ? neu.length - 1 : null);
         });
         zeile.append(b);
@@ -1002,56 +1028,81 @@ function skizzenFelder(g: Teil, f: PfadForm): HTMLElement[] {
   return felder;
 }
 
-/** Treffer auf einen Punkt (Vorrang) oder eine Kante der Skizze. */
-function skizzenTreffer(g: Teil, mx: number, my: number): { punkt: number | null; kante: number | null } {
+/** Treffer auf einen Punkt (Vorrang), einen Ausschnitt oder eine Kante. */
+function skizzenTreffer(g: Teil, mx: number, my: number): Treffer {
   const f = g.form;
-  if (f.art !== "pfad") return { punkt: null, kante: null };
   const x = mx - g.x;
   const y = my - g.y;
   const fang = 7 / ansicht.massstab;
-  let punkt: number | null = null;
+  const geo = pfadeSofort(g)?.geometrie;
   let best = fang;
-  pfadPunkte(f)
-    .slice(0, punktzahl(f))
-    .forEach((q, i) => {
-      const d = Math.hypot(q[0] - x, q[1] - y);
-      if (d <= best) {
-        best = d;
-        punkt = i;
-      }
-    });
-  if (punkt !== null) return { punkt, kante: null };
-  let kanteNr: number | null = null;
+  if (f.art === "pfad") {
+    let punkt: number | null = null;
+    pfadPunkte(f)
+      .slice(0, punktzahl(f))
+      .forEach((q, i) => {
+        const d = Math.hypot(q[0] - x, q[1] - y);
+        if (d <= best) {
+          best = d;
+          punkt = i;
+        }
+      });
+    if (punkt !== null) return { ...keinTreffer(), punkt };
+  }
+  // Ausschnitte: innen oder nah am Rand.
+  let ausschnitt: number | null = null;
   best = fang;
-  for (let k = 0; k < kantenzahl(f); k++) {
-    const d = abstandZuLinie(kantePunkte(f, k), x, y);
+  geo?.ausschnitte.forEach((a, i) => {
+    const d = enthaelt(a, x, y) ? 0 : abstandZuLinie([...a, a[0]!], x, y);
     if (d <= best) {
       best = d;
-      kanteNr = k;
+      ausschnitt = i;
     }
+  });
+  if (ausschnitt !== null) return { ...keinTreffer(), ausschnitt };
+  let kanteNr: number | null = null;
+  best = fang;
+  if (f.art === "pfad") {
+    for (let k = 0; k < kantenzahl(f); k++) {
+      const d = abstandZuLinie(kantePunkte(f, k), x, y);
+      if (d <= best) {
+        best = d;
+        kanteNr = k;
+      }
+    }
+  } else {
+    geo?.geradeKanten.forEach((k, i) => {
+      if (!k) return;
+      const d = abstandZuLinie(k, x, y);
+      if (d <= best) {
+        best = d;
+        kanteNr = i;
+      }
+    });
   }
-  return { punkt: null, kante: kanteNr };
+  return { ...keinTreffer(), kante: kanteNr };
 }
 
-/** Bemaßen: Klick wählt Punkte und Kanten (bis zu zwei), ein Klick auf ein
- * anderes Teil wählt dieses. */
+/** Bemaßen: Klick wählt Punkte, Kanten und Ausschnitte (bis zu zwei),
+ * ein Klick auf ein anderes Teil wählt dieses. */
 function bemassenKlick(mx: number, my: number): void {
   const g = gewaehlt();
   const treffer = g ? skizzenTreffer(g, mx, my) : null;
-  if (g && treffer && (treffer.punkt !== null || treffer.kante !== null)) {
-    const w = skizzenWahl;
-    const liste = treffer.punkt !== null ? w.punkte : w.kanten;
-    const i = (treffer.punkt ?? treffer.kante)!;
+  if (g && treffer && (treffer.punkt !== null || treffer.kante !== null || treffer.ausschnitt !== null)) {
+    const art = treffer.punkt !== null ? "punkte" : treffer.ausschnitt !== null ? "ausschnitte" : "kanten";
+    const i = (treffer.punkt ?? treffer.ausschnitt ?? treffer.kante)!;
+    const liste = skizzenWahl[art];
     if (liste.includes(i)) liste.splice(liste.indexOf(i), 1);
     else {
-      if (w.punkte.length + w.kanten.length >= 2) skizzenWahl = { kanten: [], punkte: [] };
-      (treffer.punkt !== null ? skizzenWahl.punkte : skizzenWahl.kanten).push(i);
+      const w = skizzenWahl;
+      if (w.punkte.length + w.kanten.length + w.ausschnitte.length >= 2) skizzenWahl = leereWahl();
+      skizzenWahl[art].push(i);
     }
   } else {
     const anderes = trefferBei(mx, my);
     auswahl = anderes?.id ?? null;
-    skizzenWahl = { kanten: [], punkte: [] };
-    if (anderes && anderes.form.art !== "pfad") melden(t("skizze.nurPfad"));
+    skizzenWahl = leereWahl();
+    if (anderes && !bemassbar(anderes)) melden(t("skizze.nurPfad"));
   }
   allesAktualisieren();
 }
@@ -1063,11 +1114,297 @@ function bemassenDoppelklick(mx: number, my: number): void {
   const f = g.form;
   const tr = skizzenTreffer(g, mx, my);
   if (tr.kante === null) return;
-  const m = moeglicheBedingungen(f, { kanten: [tr.kante], punkte: [] }).find((x) => istMass(x.b));
+  const m = moeglicheBedingungen(f, { ...leereWahl(), kanten: [tr.kante] }).find((x) => istMass(x.b));
   if (!m) return;
-  skizzenWahl = { kanten: [], punkte: [] };
+  skizzenWahl = leereWahl();
   const neu = [...f.bedingungen, m.b];
   void skizzeSetzen(g, neu, neu.length - 1);
+}
+
+// ---------------------------------------------------------------- Ausschnitte
+
+/** Lässt sich am Teil etwas bemaßen (Skizze oder Ausschnitte)? */
+function bemassbar(g: Teil): boolean {
+  return g.form.art === "pfad" || (g.ausschnitte?.length ?? 0) > 0;
+}
+
+const istOffen = (f: Form) => f.art === "pfad" && !f.geschlossen;
+const kreisRadius = (a: Ausschnitt | undefined) => (a?.form.art === "kreis" ? a.form.durchmesser / 2 : null);
+const rundeMass = (x: number) => Math.round(x * 100) / 100;
+
+/** Der Wert, den ein Abstandsmaß in der jetzigen Zeichnung hat; null,
+ * wenn es nicht passt (z. B. Rand zu Rand zwischen Nicht-Kreisen). */
+function gemessen(g: Teil, geo: Geometrie, m: Abstandsmass): number | null {
+  const liste = g.ausschnitte ?? [];
+  if (m.art === "kante") {
+    const k = geo.geradeKanten[m.kante];
+    const c = geo.ausschnittMitten[m.ausschnitt];
+    const umriss = geo.ausschnitte[m.ausschnitt];
+    if (!k || !c || !umriss) return null;
+    const [p0, p1] = k;
+    const l = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+    if (l < 1e-9) return null;
+    const n: P = [-(p1[1] - p0[1]) / l, (p1[0] - p0[0]) / l];
+    const d = (q: P) => (q[0] - p0[0]) * n[0] + (q[1] - p0[1]) * n[1];
+    const mitte = Math.abs(d(c));
+    if (m.bezug === "mitte") return mitte;
+    const r = kreisRadius(liste[m.ausschnitt]);
+    const s = d(c) < 0 ? -1 : 1;
+    return r !== null ? mitte - r : Math.min(...umriss.map((q) => s * d(q)));
+  }
+  const ca = geo.ausschnittMitten[m.a];
+  const cb = geo.ausschnittMitten[m.b];
+  const ua = geo.ausschnitte[m.a];
+  const ub = geo.ausschnitte[m.b];
+  if (!ca || !cb || !ua || !ub) return null;
+  if (m.richtung === "direkt") {
+    const d = Math.hypot(cb[0] - ca[0], cb[1] - ca[1]);
+    if (m.bezug === "mitte") return d;
+    const ra = kreisRadius(liste[m.a]);
+    const rb = kreisRadius(liste[m.b]);
+    return ra !== null && rb !== null ? d - ra - rb : null;
+  }
+  const achse = m.richtung === "waagerecht" ? 0 : 1;
+  const d = cb[achse] - ca[achse];
+  if (m.bezug === "mitte") return Math.abs(d);
+  const min = (u: P[]) => Math.min(...u.map((q) => q[achse]));
+  const max = (u: P[]) => Math.max(...u.map((q) => q[achse]));
+  return d >= 0 ? min(ub) - max(ua) : min(ua) - max(ub);
+}
+
+/** Abstandsmaße, die zur Wahl passen, mit den gezeichneten Werten; immer
+ * zur Mitte und zum Rand. */
+function moeglicheAbstaende(g: Teil, w: SkizzenWahl): { text: string; m: Abstandsmass }[] {
+  const geo = pfadeSofort(g)?.geometrie;
+  if (!geo || w.punkte.length > 0) return [];
+  const kandidaten: Abstandsmass[] = [];
+  const bezuege: Bezug[] = ["mitte", "rand"];
+  if (w.ausschnitte.length === 1 && w.kanten.length === 1) {
+    const [ausschnitt, kante] = [w.ausschnitte[0]!, w.kanten[0]!];
+    for (const bezug of bezuege) kandidaten.push({ art: "kante", ausschnitt, kante, bezug, wert: 0 });
+  } else if (w.ausschnitte.length === 2 && w.kanten.length === 0) {
+    const [a, b] = w.ausschnitte as [number, number];
+    for (const richtung of ["waagerecht", "senkrecht", "direkt"] as const) {
+      for (const bezug of bezuege) kandidaten.push({ art: "zwischen", a, b, richtung, bezug, wert: 0 });
+    }
+  }
+  const aus: { text: string; m: Abstandsmass }[] = [];
+  for (const m of kandidaten) {
+    const wert = gemessen(g, geo, m);
+    if (wert === null || wert <= 0.005) continue;
+    m.wert = rundeMass(wert);
+    const art = m.art === "kante" ? "kante" : m.richtung;
+    aus.push({ text: t(`abstand.${art}.${m.bezug}` as TextSchluessel, { w: zahl(m.wert) }), m });
+  }
+  return aus;
+}
+
+/** Bezeichnung eines Abstandsmaßes; Kanten ab 1 gezählt. */
+function abstandText(g: Teil, m: Abstandsmass): string {
+  const name = (i: number) => g.ausschnitte?.[i]?.name ?? String(i + 1);
+  if (m.art === "kante") return t("abstand.kante.text", { a: name(m.ausschnitt), k: m.kante + 1 });
+  return t(`abstand.${m.richtung}.text` as TextSchluessel, { a: name(m.a), b: name(m.b) });
+}
+
+/** Neue Abstandsmaße lösen lassen; übernehmen nur, wenn alle Ausschnitte
+ * danach noch im Teil liegen und kein Maß doppelt ist. */
+async function abstandSetzen(g: Teil, masse: Abstandsmass[], fokus: number | null = null): Promise<boolean> {
+  const stand = (x: Teil) => JSON.stringify([x.form, x.ausschnitte, x.abstandsmasse]);
+  const vorher = stand(g);
+  const versuch: Teil = { ...structuredClone(g), abstandsmasse: masse };
+  try {
+    const e = await ausschnitteLoesen(versuch);
+    if (e.ueberbestimmt) {
+      melden(t("skizze.ueberbestimmt"));
+      eigenschaftenAktualisieren();
+      neuZeichnen();
+      return false;
+    }
+    const jetzt = muster().teile.find((x) => x.id === g.id);
+    if (!jetzt || stand(jetzt) !== vorher) return false;
+    fokusAbstand = fokus;
+    aendern(() => {
+      jetzt.abstandsmasse = masse;
+      jetzt.ausschnitte?.forEach((a, i) => {
+        const p = e.positionen[i];
+        if (p) [a.x, a.y] = p;
+      });
+    });
+    melden(e.freiheitsgrade === 0 ? t("abstand.bestimmt") : t("abstand.frei"));
+    return true;
+  } catch (err) {
+    melden(fehlertext(String(err)));
+    eigenschaftenAktualisieren();
+    neuZeichnen();
+    return false;
+  }
+}
+
+/** Maße ohne Ausschnitt `i`; spätere Ausschnitte rücken eins vor. */
+function ohneAusschnitt(masse: Abstandsmass[], i: number): Abstandsmass[] {
+  const neu = (j: number) => (j > i ? j - 1 : j);
+  return masse
+    .filter((m) => (m.art === "kante" ? m.ausschnitt !== i : m.a !== i && m.b !== i))
+    .map((m) => (m.art === "kante" ? { ...m, ausschnitt: neu(m.ausschnitt) } : { ...m, a: neu(m.a), b: neu(m.b) }));
+}
+
+/** Ausschnitt entfernen; mit `loesen` wird er wieder ein eigenes Teil. */
+function ausschnittEntfernen(g: Teil, i: number, loesen: boolean): void {
+  const lage = pfadeSofort(g)?.geometrie.ausschnittLagen[i];
+  aendern((m) => {
+    const a = g.ausschnitte?.[i];
+    if (!a) return;
+    g.ausschnitte = g.ausschnitte!.filter((_, j) => j !== i);
+    g.abstandsmasse = ohneAusschnitt(g.abstandsmasse ?? [], i);
+    if (loesen) {
+      const id = neueId(m);
+      const [x, y] = lage ?? [a.x, a.y];
+      m.teile.push({ id, name: a.name, form: a.form, x: g.x + x, y: g.y + y, naht: null });
+      auswahl = id;
+    }
+  });
+}
+
+/** Teil `g` aus Teil `zielId` ausstanzen: Es wird ein Ausschnitt dort, wo
+ * es gerade liegt. Der Kern prüft vorher, ob es ganz im Teil liegt. */
+async function ausstanzen(g: Teil, zielId: number): Promise<void> {
+  const ziel = muster().teile.find((x) => x.id === zielId);
+  if (!ziel) return;
+  const neu: Ausschnitt = { name: g.name, form: structuredClone(g.form), x: g.x - ziel.x, y: g.y - ziel.y };
+  const versuch: Teil = { ...structuredClone(ziel), ausschnitte: [...(ziel.ausschnitte ?? []), neu] };
+  try {
+    await pfadeFuer(versuch);
+  } catch (e) {
+    melden(fehlertext(String(e)));
+    return;
+  }
+  aendern((m) => {
+    const z = m.teile.find((x) => x.id === zielId);
+    if (!z) return;
+    m.teile = m.teile.filter((x) => x.id !== g.id);
+    z.ausschnitte = [...(z.ausschnitte ?? []), neu];
+    auswahl = zielId;
+  });
+  melden(t("ausstanzen.fertig", { a: g.name, z: ziel.name }));
+}
+
+/** Abschnitt „Ausstanzen“: dieses Teil aus einem anderen ausstanzen. */
+function ausstanzenFelder(g: Teil): HTMLElement[] {
+  if (istOffen(g.form) || (g.ausschnitte?.length ?? 0) > 0) return [];
+  const ziele = muster().teile.filter((x) => x.id !== g.id && !istOffen(x.form));
+  if (ziele.length === 0) return [];
+  // Vorschlag: das Teil, auf dem dieses gerade liegt.
+  const p = pfadeSofort(g);
+  const mitte: P = p ? [g.x + (p.min[0] + p.max[0]) / 2, g.y + (p.min[1] + p.max[1]) / 2] : [g.x, g.y];
+  const darunter = [...ziele].reverse().find((x) => {
+    const q = pfadeSofort(x)?.geometrie;
+    return q && enthaelt(q.kontur, mitte[0] - x.x, mitte[1] - x.y);
+  });
+  let zielId = (darunter ?? ziele[0]!).id;
+  const wahl = auswahlFeld(
+    t("ausstanzen.aus"),
+    String(zielId),
+    ziele.map((x) => [String(x.id), x.name] as [string, string]),
+    (x) => (zielId = Number(x)),
+  );
+  const knopf = el("button", { type: "button", title: t("ausstanzen.titel") }, t("ausstanzen"));
+  knopf.addEventListener("click", () => void ausstanzen(g, zielId));
+  return [el("h3", {}, t("ausstanzen")), wahl, el("div", { class: "knopfzeile knopfzeile-eng" }, knopf)];
+}
+
+/** Abschnitt „Ausschnitte“: Größe, Lage und Abstandsmaße. */
+function ausschnittFelder(g: Teil): HTMLElement[] {
+  const liste = g.ausschnitte ?? [];
+  if (liste.length === 0) return [];
+  const geo = pfadeSofort(g)?.geometrie;
+  const felder: HTMLElement[] = [el("h3", {}, t("ausschnitte"))];
+  const fest = geo ? geo.ausschnittFrei.every((x) => !x) : false;
+  felder.push(el("p", { class: fest ? "meldung gut" : "meldung" }, !geo ? t("skizze.unbekannt") : fest ? t("abstand.bestimmt") : t("abstand.frei")));
+
+  if (werkzeug !== "bemassen") {
+    // Bei gezeichneten Teilen steht der Knopf schon bei der Skizze.
+    if (g.form.art !== "pfad") {
+      const b = el("button", { type: "button", title: `${t("werkzeug.bemassen")} (D)` }, t("skizze.bemassen"));
+      b.addEventListener("click", () => werkzeugWaehlen("bemassen"));
+      felder.push(el("div", { class: "knopfzeile knopfzeile-eng" }, b));
+    }
+  } else {
+    const moeglich = moeglicheAbstaende(g, skizzenWahl);
+    if (moeglich.length > 0) {
+      const zeile = el("div", { class: "knopfzeile knopfzeile-eng bedingungen-knoepfe" });
+      for (const m of moeglich) {
+        const b = el("button", { type: "button" }, m.text);
+        b.addEventListener("click", () => {
+          const neu = [...(g.abstandsmasse ?? []), m.m];
+          skizzenWahl = leereWahl();
+          void abstandSetzen(g, neu, neu.length - 1);
+        });
+        zeile.append(b);
+      }
+      felder.push(zeile);
+    } else if (g.form.art !== "pfad" || skizzenWahl.ausschnitte.length > 0) {
+      felder.push(el("p", { class: "meldung" }, t("abstand.waehlen")));
+    }
+  }
+
+  liste.forEach((a, i) => {
+    const f = a.form;
+    felder.push(el("p", { class: "feld-titel" }, `${i + 1}. ${a.name}`));
+    if (f.art === "kreis") {
+      felder.push(zahlFeld(t("teil.durchmesser"), f.durchmesser, (x) => aendern(() => (f.durchmesser = x))));
+    } else if (f.art === "rechteck" || f.art === "ellipse") {
+      felder.push(
+        zahlFeld(t("teil.breite"), f.breite, (x) => aendern(() => (f.breite = x))),
+        zahlFeld(t("teil.hoehe"), f.hoehe, (x) => aendern(() => (f.hoehe = x))),
+      );
+      if (f.art === "rechteck") felder.push(zahlFeld(t("teil.radius"), f.eckenradius, (x) => aendern(() => (f.eckenradius = x))));
+    }
+    const lage = geo?.ausschnittLagen[i] ?? [a.x, a.y];
+    felder.push(
+      zahlFeld(t("ausschnitt.x"), lage[0], (x) => aendern(() => ([a.x, a.y] = [x, lage[1]]))),
+      zahlFeld(t("ausschnitt.y"), lage[1], (y) => aendern(() => ([a.x, a.y] = [lage[0], y]))),
+    );
+    const loesen = el("button", { type: "button", title: t("ausschnitt.loesen.titel") }, t("ausschnitt.loesen"));
+    loesen.addEventListener("click", () => ausschnittEntfernen(g, i, true));
+    const weg = el("button", { type: "button", class: "gefahr" }, t("ausschnitt.entfernen"));
+    weg.addEventListener("click", () => ausschnittEntfernen(g, i, false));
+    felder.push(el("div", { class: "knopfzeile knopfzeile-eng" }, loesen, weg));
+  });
+
+  const masse = g.abstandsmasse ?? [];
+  if (masse.length > 0) {
+    felder.push(el("p", { class: "feld-titel" }, t("abstand.masse")));
+    masse.forEach((m, i) => {
+      const aendereMass = (neu: Abstandsmass) => {
+        const alle = structuredClone(masse);
+        alle[i] = neu;
+        void abstandSetzen(g, alle);
+      };
+      const feld = zahlFeld(abstandText(g, m), m.wert, (x) => aendereMass({ ...m, wert: x }));
+      // Wovon aus gemessen wird. Beim Umschalten bleibt der Ausschnitt,
+      // wo er ist, und der Wert passt sich an.
+      const bezugWahl = auswahlFeld<Bezug>(t("abstand.bezug"), m.bezug, [["mitte", t("abstand.mitte")], ["rand", t("abstand.rand")]], (b) => {
+        const neu = { ...m, bezug: b };
+        const w = geo ? gemessen(g, geo, neu) : null;
+        if (w === null || w <= 0) {
+          melden(fehlertext("ausschnitt.unpassend"));
+          eigenschaftenAktualisieren();
+          return;
+        }
+        aendereMass({ ...neu, wert: rundeMass(w) });
+      });
+      // Immer beide Werte zeigen: den gewählten im Feld, den anderen hier.
+      const anders = geo ? gemessen(g, geo, { ...m, bezug: m.bezug === "mitte" ? "rand" : "mitte" }) : null;
+      const hinweis =
+        anders !== null && anders > 0
+          ? [el("p", { class: "meldung" }, t(m.bezug === "mitte" ? "abstand.randIst" : "abstand.mitteIst", { w: zahl(anders) }))]
+          : [];
+      const knopf = el("button", { type: "button", class: "klein entfernen", title: t("skizze.entfernen"), "aria-label": t("skizze.entfernen") }, "×");
+      knopf.addEventListener("click", () => void abstandSetzen(g, masse.filter((_, j) => j !== i)));
+      felder.push(el("div", { class: "mass-zeile", "data-abstand": String(i) }, feld, knopf), bezugWahl, ...hinweis);
+    });
+  }
+  return felder;
 }
 
 // ---------------------------------------------------------------- Zusammenbau
@@ -1143,8 +1480,11 @@ function trefferBei(mx: number, my: number): Teil | undefined {
     const ort = lage(x, zusammenbau);
     if (!p || !ort) continue;
     const g = p.geometrie;
-    const nah = abstandZuLinie(g.geschlossen ? [...g.kontur, g.kontur[0]!] : g.kontur, mx - ort[0], my - ort[1]) * ansicht.massstab <= 6;
-    if (nah || (g.geschlossen && enthaelt(g.kontur, mx - ort[0], my - ort[1]))) return x;
+    const [px, py] = [mx - ort[0], my - ort[1]];
+    const nah = abstandZuLinie(g.geschlossen ? [...g.kontur, g.kontur[0]!] : g.kontur, px, py) * ansicht.massstab <= 6;
+    // Im Loch eines Ausschnitts ist kein Leder, außer man trifft seinen Rand.
+    const imLoch = g.ausschnitte.some((a) => enthaelt(a, px, py) && abstandZuLinie([...a, a[0]!], px, py) * ansicht.massstab > 6);
+    if (nah || (g.geschlossen && enthaelt(g.kontur, px, py) && !imLoch)) return x;
   }
   return undefined;
 }
@@ -1182,8 +1522,8 @@ canvas.addEventListener("pointermove", (e) => {
   }
   if (!ziehen && werkzeug === "bemassen") {
     const g = gewaehlt();
-    const neu = g && !zusammenbau ? skizzenTreffer(g, mx, my) : { kante: null, punkt: null };
-    if (neu.kante !== skizzenHover.kante || neu.punkt !== skizzenHover.punkt) {
+    const neu = g && !zusammenbau ? skizzenTreffer(g, mx, my) : keinTreffer();
+    if (neu.kante !== skizzenHover.kante || neu.punkt !== skizzenHover.punkt || neu.ausschnitt !== skizzenHover.ausschnitt) {
       skizzenHover = neu;
       neuZeichnen();
     }
@@ -1251,8 +1591,8 @@ canvas.addEventListener("pointerup", () => {
 });
 
 canvas.addEventListener("pointerleave", () => {
-  if (skizzenHover.kante === null && skizzenHover.punkt === null) return;
-  skizzenHover = { kante: null, punkt: null };
+  if (skizzenHover.kante === null && skizzenHover.punkt === null && skizzenHover.ausschnitt === null) return;
+  skizzenHover = keinTreffer();
   neuZeichnen();
 });
 
@@ -1339,8 +1679,8 @@ window.addEventListener("keydown", (e) => {
     neuZeichnen();
   } else if ((taste === "delete" || taste === "backspace") && e.target === canvas) {
     loeschen();
-  } else if (taste === "escape" && werkzeug === "bemassen" && skizzenWahl.kanten.length + skizzenWahl.punkte.length > 0) {
-    skizzenWahl = { kanten: [], punkte: [] };
+  } else if (taste === "escape" && werkzeug === "bemassen" && skizzenWahl.kanten.length + skizzenWahl.punkte.length + skizzenWahl.ausschnitte.length > 0) {
+    skizzenWahl = leereWahl();
     allesAktualisieren();
   } else if (taste === "escape") {
     auswahl = null;
@@ -1366,7 +1706,7 @@ function masseUmschalten(): void {
 
 function zusammenbauUmschalten(): void {
   zusammenbau = !zusammenbau;
-  skizzenWahl = { kanten: [], punkte: [] };
+  skizzenWahl = leereWahl();
   melden(t(zusammenbau ? "ansicht.zusammenbau.an" : "ansicht.zusammenbau.aus"));
   ansicht.allesZeigen(muster(), zusammenbau);
   allesAktualisieren();

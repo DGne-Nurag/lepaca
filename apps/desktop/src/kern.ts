@@ -3,7 +3,7 @@
 // Berechnung.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { Druck, Element, Form, Montage, Naht, P, Teil } from "./modell";
+import type { Abstandsmass, Ausschnitt, Druck, Element, Form, Montage, Naht, P, Teil } from "./modell";
 
 export interface MassGrafik {
   /** Index der Bedingung; null bei Maßen einer Grundform. */
@@ -32,6 +32,18 @@ export interface Geometrie {
   stichfehler: string | null;
   masse: MassGrafik[];
   symbole: SymbolGrafik[];
+  /** Umrisse der Ausschnitte, relativ zum Teil. */
+  ausschnitte: P[][];
+  /** Gelöste Position je Ausschnitt (relativ zum Teil). */
+  ausschnittLagen: P[];
+  /** Mittelpunkt je Ausschnitt (relativ zum Teil). */
+  ausschnittMitten: P[];
+  /** Je Ausschnitt, ob er sich noch verschieben lässt. */
+  ausschnittFrei: boolean[];
+  /** Gerade Kanten des Teils für Abstandsmaße; null: gebogen. */
+  geradeKanten: ([P, P] | null)[];
+  /** Stichlöcher, die in einem Ausschnitt oder zu nah daran liegen. */
+  loecherAmAusschnitt: number;
 }
 
 export interface Pfade {
@@ -58,6 +70,8 @@ function teilDaten(t: Teil, x: number, y: number, mitMontage = false) {
     y,
     stiche: t.naht,
     montage: mitMontage ? (t.montage ?? null) : null,
+    ausschnitte: t.ausschnitte ?? [],
+    abstandsmasse: t.abstandsmasse ?? [],
   };
 }
 
@@ -74,7 +88,7 @@ const fehler = new Map<string, string>();
 const laufend = new Map<string, Promise<Pfade>>();
 
 function schluessel(t: Teil): string {
-  return JSON.stringify([t.form, t.naht]);
+  return JSON.stringify([t.form, t.naht, t.ausschnitte ?? [], t.abstandsmasse ?? []]);
 }
 
 /** Fehlercode, falls der Kern die Form abgelehnt hat. */
@@ -107,7 +121,10 @@ export async function pfadeFuer(t: Teil): Promise<Pfade> {
       min = [Math.min(min[0], x), Math.min(min[1], y)];
       max = [Math.max(max[0], x), Math.max(max[1], y)];
     }
-    const fertig: Pfade = { geometrie: g, kontur: pfad(g.kontur, g.geschlossen), linie, loecher, min, max };
+    // Ausschnitte gehören zur Schnittkante; gefüllt wird mit „evenodd“.
+    const kontur = pfad(g.kontur, g.geschlossen);
+    for (const a of g.ausschnitte) kontur.addPath(pfad(a));
+    const fertig: Pfade = { geometrie: g, kontur, linie, loecher, min, max };
     if (cache.size > 2000) cache.clear();
     cache.set(s, fertig);
     laufend.delete(s);
@@ -159,6 +176,21 @@ export function skizzeSofort(form: Extract<Form, { art: "pfad" }>): SkizzenErgeb
   return skizzen.get(JSON.stringify(form));
 }
 
+// ---------------------------------------------------------------- Ausschnitte
+
+export interface AusschnittErgebnis {
+  positionen: P[];
+  freiheitsgrade: number;
+  ueberbestimmt: boolean;
+  frei: boolean[];
+}
+
+/** Richtet die Ausschnitte nach ihren Maßen aus; wirft den Fehlercode des
+ * Kerns, z. B. wenn ein Ausschnitt dann aus dem Teil ragt. */
+export function ausschnitteLoesen(t: Teil): Promise<AusschnittErgebnis> {
+  return invoke<AusschnittErgebnis>("ausschnitte_loesen", { teil: teilDaten(t, 0, 0) });
+}
+
 // ---------------------------------------------------------------- Zusammenbau
 
 export interface MontageErgebnis {
@@ -192,7 +224,7 @@ export function uebernommeneSofort(t: Teil): Uebernommen | undefined {
  * sich etwas geändert hat. */
 export async function montageAktualisieren(teile: Teil[]): Promise<boolean> {
   const beteiligt = montageTeile(teile);
-  const s = JSON.stringify(beteiligt.map((t) => [t.id, t.form, t.naht, t.x, t.y, t.montage]));
+  const s = JSON.stringify(beteiligt.map((t) => [t.id, t.form, t.naht, t.x, t.y, t.montage, t.ausschnitte, t.abstandsmasse]));
   if (s === montageSchluessel) {
     await montageLaeuft;
     return false;
@@ -233,6 +265,8 @@ export interface VorlageTeil {
   y: number;
   stiche: Naht | null;
   montage: Montage | null;
+  ausschnitte: (Omit<Ausschnitt, "name"> & { name: string | null })[];
+  abstandsmasse: Abstandsmass[];
 }
 
 export interface Vorlage {

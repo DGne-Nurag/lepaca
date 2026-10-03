@@ -24,6 +24,9 @@ export interface SkizzenAnzeige {
   hoverPunkt: number | null;
   /** Je Kante, ob sie noch frei beweglich ist (vom Löser). */
   freieKanten: boolean[] | null;
+  /** Gewählte Ausschnitte und der unter der Maus. */
+  ausschnitte: number[];
+  hoverAusschnitt: number | null;
 }
 
 /** Wo ein Teil gezeichnet wird: im Muster oder im Zusammenbau. */
@@ -263,7 +266,8 @@ export class Ansicht {
     if (p.geometrie.geschlossen) {
       c.fillStyle = farbe("--leder");
       if (durchscheinend) c.globalAlpha = 0.45;
-      c.fill(p.kontur);
+      // „evenodd“: Ausschnitte bleiben leer.
+      c.fill(p.kontur, "evenodd");
       c.globalAlpha = 1;
     }
     c.lineWidth = (gewaehlt ? 2.5 : 1.25) * px;
@@ -294,6 +298,31 @@ export class Ansicht {
       });
     } else {
       c.stroke(p.kontur);
+      // Gerade Kanten einer Grundform, auf die sich Abstände beziehen.
+      if (skizze) {
+        p.geometrie.geradeKanten.forEach((k, i) => {
+          if (!k || !(skizze.kanten.includes(i) || skizze.hoverKante === i)) return;
+          c.beginPath();
+          c.moveTo(k[0][0], k[0][1]);
+          c.lineTo(k[1][0], k[1][1]);
+          c.lineWidth = 4 * px;
+          c.strokeStyle = farbe("--markiert");
+          c.stroke();
+        });
+      }
+    }
+    if (skizze) {
+      // Ausschnitte: noch verschiebbare in Blau, gewählte hervorgehoben.
+      p.geometrie.ausschnitte.forEach((a, i) => {
+        const markiert = skizze.ausschnitte.includes(i) || skizze.hoverAusschnitt === i;
+        const frei = p.geometrie.ausschnittFrei[i] ?? false;
+        c.beginPath();
+        a.forEach(([x, y], j) => (j === 0 ? c.moveTo(x, y) : c.lineTo(x, y)));
+        c.closePath();
+        c.lineWidth = (markiert ? 4 : 2) * px;
+        c.strokeStyle = markiert ? farbe("--markiert") : frei ? farbe("--frei") : farbe("--kante");
+        c.stroke();
+      });
     }
 
     const uebernommen = uebernommeneSofort(t);

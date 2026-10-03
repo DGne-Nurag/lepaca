@@ -11,6 +11,7 @@
 //! einer Naht genau dieselben Löcher, und eine Naht, die vor dem Aufsetzen
 //! eines Teils genäht wird, geht nicht hindurch.
 
+use crate::ausschnitt::{self, Abstandsmass, Ausschnitt, AusschnittFehler};
 use crate::eisen::{Eisenart, Lochform};
 use crate::form::{Form, FormFehler, OffeneLinie, Pfad, TPocketNaehte};
 use crate::geometrie::{Kontur, Punkt};
@@ -70,6 +71,8 @@ pub struct Teil {
     pub position: Punkt,
     pub naht: Option<Naht>,
     pub montage: Option<Montage>,
+    /// Formen, die aus dem Teil ausgestanzt werden (Löcher, Fenster).
+    pub ausschnitte: Vec<Ausschnitt>,
 }
 
 /// Die Umrisslinie eines Teils an seiner Lage im Muster.
@@ -79,6 +82,8 @@ pub enum Umriss {
         kontur: Kontur,
         /// Je Konturkante, ob dort genäht wird; `None` heißt ringsum.
         kanten: Option<Vec<bool>>,
+        /// Ausgestanzte Formen, an ihrer Lage im Muster.
+        ausschnitte: Vec<Kontur>,
     },
     Linie(OffeneLinie),
 }
@@ -103,6 +108,8 @@ pub struct Musterteil {
     pub teil: Teil,
     /// Maße und Bedingungen, falls das Teil eine Skizze ist.
     pub bedingungen: Vec<crate::skizze::Bedingung>,
+    /// Maße, die die Ausschnitte im Teil festlegen.
+    pub abstandsmasse: Vec<Abstandsmass>,
 }
 
 /// Höchstzahl Teile in einem Muster.
@@ -114,6 +121,9 @@ impl Teil {
         let d = self.position;
         match &self.form {
             TeilForm::Offen(p) => {
+                if !self.ausschnitte.is_empty() {
+                    return Err(AusschnittFehler::OffeneLinie.into());
+                }
                 let mut l = p.linienzug()?;
                 for q in &mut l.punkte {
                     *q = q.plus(d);
@@ -137,9 +147,12 @@ impl Teil {
                     (_, Some(Nahtkanten::Ringsum) | None) => (f.kontur()?, None),
                     _ => return Err(StichFehler::KantenUnpassend.into()),
                 };
+                let innen = ausschnitt::konturen(&self.ausschnitte)?;
+                ausschnitt::pruefen(&kontur, &innen)?;
                 Ok(Umriss::Teil {
                     kontur: kontur.verschoben(d.x, d.y),
                     kanten,
+                    ausschnitte: innen.iter().map(|k| k.verschoben(d.x, d.y)).collect(),
                 })
             }
         }
@@ -153,6 +166,7 @@ impl Teil {
             Umriss::Teil {
                 kontur,
                 kanten: Some(k),
+                ..
             } => {
                 if k.iter().any(|x| *x) {
                     stichlinie::stichreihe_an_kanten(kontur, k, e)
@@ -167,6 +181,7 @@ impl Teil {
             Umriss::Teil {
                 kontur,
                 kanten: None,
+                ..
             } => stichlinie::stichreihe(kontur, e),
             Umriss::Linie(l) => stichlinie::stichreihe_entlang(&l.punkte, &l.ecke, e),
         };
@@ -179,6 +194,16 @@ impl Teil {
 pub enum StichOderForm {
     Form(FormFehler),
     Stich(StichFehler),
+    Ausschnitt(AusschnittFehler),
+}
+
+impl From<AusschnittFehler> for StichOderForm {
+    fn from(f: AusschnittFehler) -> Self {
+        match f {
+            AusschnittFehler::Form(f) => StichOderForm::Form(f),
+            f => StichOderForm::Ausschnitt(f),
+        }
+    }
 }
 
 impl From<FormFehler> for StichOderForm {
@@ -263,13 +288,24 @@ pub fn durchstechen(
         .collect();
 
     for (q, ziel) in teile.iter().enumerate() {
-        let (Some(mq), Some(dq), Some(Umriss::Teil { kontur, .. })) =
-            (ziel.montage, versatz[q], umrisse[q])
+        let (
+            Some(mq),
+            Some(dq),
+            Some(Umriss::Teil {
+                kontur,
+                ausschnitte,
+                ..
+            }),
+        ) = (ziel.montage, versatz[q], umrisse[q])
         else {
             continue;
         };
-        // Kontur des empfangenden Teils im Zusammenbau.
+        // Kontur und Ausschnitte des empfangenden Teils im Zusammenbau.
         let kontur_z = kontur.verschoben(dq.x, dq.y);
+        let ausschnitte_z: Vec<Kontur> = ausschnitte
+            .iter()
+            .map(|k| k.verschoben(dq.x, dq.y))
+            .collect();
         // Alle Löcher, die das Teil schon hat (eigene und übernommene), im
         // Zusammenbau, um doppelte und zu dichte Löcher zu erkennen.
         let mut vorhanden: Vec<Punkt> = stiche[q]
@@ -299,6 +335,16 @@ pub fn durchstechen(
                         d.kantennah += 1;
                     }
                     continue;
+                }
+                // In einem Ausschnitt ist kein Leder: dort kein Loch. Knapp
+                // daneben reißt es aus.
+                if let Some(drin) =
+                    am_ausschnitt(&ausschnitte_z, &Stichloch { mitte: m, ..*l }, form)
+                {
+                    d.kantennah += 1;
+                    if drin {
+                        continue;
+                    }
                 }
                 if rand < MIN_KANTENABSTAND_MM {
                     // Gilt nur für Kanten, an denen die Naht nicht entlang
@@ -339,6 +385,35 @@ fn l_kantenabstand(t: &Teil) -> f64 {
         (TeilForm::Geschlossen(_), Some(n)) => n.einstellung.kantenabstand.wert(),
         _ => f64::INFINITY,
     }
+}
+
+/// Liegt ein Loch in einem Ausschnitt (`Some(true)`) oder so nah an
+/// dessen Rand, dass es ausreißt (`Some(false)`)?
+fn am_ausschnitt(ausschnitte: &[Kontur], l: &Stichloch, form: &Lochform) -> Option<bool> {
+    if ausschnitte.iter().any(|a| enthaelt(a, l.mitte)) {
+        return Some(true);
+    }
+    let umriss = form.umriss(l);
+    ausschnitte
+        .iter()
+        .any(|a| {
+            abstand_zur_kontur(a, l.mitte) < MIN_KANTENABSTAND_MM
+                || umriss.iter().any(|e| enthaelt(a, *e))
+        })
+        .then_some(false)
+}
+
+/// Wie viele Stichlöcher der eigenen Naht in einem Ausschnitt liegen oder
+/// so nah an seinem Rand, dass sie ausreißen.
+pub fn loecher_am_ausschnitt(u: &Umriss, reihe: &Stichreihe, form: &Lochform) -> usize {
+    let Umriss::Teil { ausschnitte, .. } = u else {
+        return 0;
+    };
+    reihe
+        .loecher
+        .iter()
+        .filter(|l| am_ausschnitt(ausschnitte, l, form).is_some())
+        .count()
 }
 
 /// Ein Teil komplett berechnet: Umriss, eigene Naht und übernommene Löcher.
@@ -385,6 +460,7 @@ pub fn durchstechen_berechnet(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ausschnitt::Ausschnitt;
     use crate::mass::{Mm, TOLERANZ_MM};
     use crate::stichlinie::Eckausrichtung;
 
@@ -424,6 +500,7 @@ mod tests {
                     position: Punkt::neu(0.0, 0.0),
                     schritt: 2,
                 }),
+                ausschnitte: Vec::new(),
             },
             Teil {
                 form: TeilForm::Geschlossen(rechteck(51.0, 29.0)),
@@ -434,6 +511,7 @@ mod tests {
                     position: Punkt::neu(0.0, 31.0),
                     schritt: 1,
                 }),
+                ausschnitte: Vec::new(),
             },
         ]
     }
@@ -517,5 +595,96 @@ mod tests {
         let b = berechnen(&teile);
         let d = durchstechen_berechnet(&teile, &b);
         assert!(d[1].zu_dicht > 0);
+    }
+
+    fn kreis(d: f64, x: f64, y: f64) -> Ausschnitt {
+        Ausschnitt {
+            form: Form::Kreis { durchmesser: mm(d) },
+            position: Punkt::neu(x, y),
+        }
+    }
+
+    #[test]
+    fn ein_ausgestanzter_kreis_ist_eine_zweite_schnittlinie_an_der_lage_des_teils() {
+        let mut teile = muster();
+        teile[0].position = Punkt::neu(200.0, 0.0);
+        teile[0].ausschnitte = vec![kreis(20.0, 40.0, 20.0)];
+        let u = teile[0].umriss().unwrap();
+        let Umriss::Teil { ausschnitte, .. } = &u else {
+            panic!("Teil erwartet");
+        };
+        assert_eq!(ausschnitte.len(), 1);
+        let (min, max) = ausschnitte[0].grenzen();
+        assert!(min.abstand(Punkt::neu(240.0, 20.0)) < 0.02);
+        assert!(max.abstand(Punkt::neu(260.0, 40.0)) < 0.02);
+    }
+
+    #[test]
+    fn ein_ausschnitt_ueber_die_kante_hinaus_wird_abgelehnt() {
+        let mut teile = muster();
+        teile[0].ausschnitte = vec![kreis(20.0, 90.0, 20.0)];
+        assert_eq!(
+            teile[0].umriss(),
+            Err(StichOderForm::Ausschnitt(AusschnittFehler::NichtImTeil))
+        );
+    }
+
+    #[test]
+    fn aus_einer_offenen_linie_laesst_sich_nichts_ausstanzen() {
+        let t = Teil {
+            form: TeilForm::Offen(Pfad {
+                start: Punkt::neu(0.0, 0.0),
+                elemente: vec![crate::form::PfadElement::Linie(Punkt::neu(50.0, 0.0))],
+            }),
+            position: Punkt::neu(0.0, 0.0),
+            naht: None,
+            montage: None,
+            ausschnitte: vec![kreis(5.0, 10.0, 10.0)],
+        };
+        assert_eq!(
+            t.umriss(),
+            Err(StichOderForm::Ausschnitt(AusschnittFehler::OffeneLinie))
+        );
+    }
+
+    #[test]
+    fn stichloecher_im_oder_direkt_am_ausschnitt_werden_gemeldet() {
+        let mut teile = muster();
+        // Randnaht 3 mm vom Rand; ein Loch, das bis 2 mm an den Rand reicht,
+        // liegt genau über der Lochreihe oben.
+        teile[0].ausschnitte = vec![kreis(10.0, 45.0, 2.0)];
+        let b = berechnen(&teile);
+        let b0 = b[0].as_ref().unwrap();
+        let (reihe, form) = b0.stiche.as_ref().unwrap().as_ref().unwrap();
+        assert!(loecher_am_ausschnitt(&b0.umriss, reihe, form) > 0);
+        // Mitten im Teil stört es keine Naht.
+        teile[0].ausschnitte = vec![kreis(10.0, 45.0, 25.0)];
+        let b = berechnen(&teile);
+        let b0 = b[0].as_ref().unwrap();
+        let (reihe, form) = b0.stiche.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(loecher_am_ausschnitt(&b0.umriss, reihe, form), 0);
+    }
+
+    #[test]
+    fn eine_naht_ueber_einem_ausschnitt_der_tasche_sticht_dort_kein_loch() {
+        let mut teile = muster();
+        // Ein Loch in der Tasche genau unter der linken Randnaht
+        // (x = 3 mm im Zusammenbau).
+        teile[1].ausschnitte = vec![kreis(6.0, 1.0, 10.0)];
+        let ohne = durchstechen_berechnet(&muster(), &berechnen(&muster()));
+        let b = berechnen(&teile);
+        let mit = durchstechen_berechnet(&teile, &b);
+        assert!(mit[1].loecher.len() < ohne[1].loecher.len());
+        assert!(mit[1].kantennah > 0);
+        // Kein übernommenes Loch liegt im Fenster.
+        let Umriss::Teil { ausschnitte, .. } = &b[1].as_ref().unwrap().umriss else {
+            panic!("Teil erwartet");
+        };
+        assert!(
+            mit[1]
+                .loecher
+                .iter()
+                .all(|l| !enthaelt(&ausschnitte[0], l.loch.mitte))
+        );
     }
 }
