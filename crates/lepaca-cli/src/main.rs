@@ -22,6 +22,11 @@ Aufruf:
   lepaca vorlage bifold [--papier …] [--rand …] [--klebekante …] --ausgabe <datei.pdf>
                           Fertiges Muster einer Bifold-Geldbörse als PDF,
                           mit Maßen und passenden Löchern in allen Teilen
+  lepaca vorlage uhrarmband --stegbreite <mm> --armumfang <mm> [--hornabstand <mm>]
+                          [--papier …] [--rand …] [--klebekante …] --ausgabe <datei.pdf>
+                          Zweilagiges Uhrarmband (Lang-, Kurzteil, Schlaufe)
+                          passend zu Uhr und Handgelenk; Hornabstand
+                          (Lug-to-Lug) Standard: 48
 
 Optionen (alle Maße in Millimetern):
   --form rechteck|kreis|ellipse|tpocket
@@ -38,6 +43,9 @@ Optionen (alle Maße in Millimetern):
   --kantenabstand <mm>            Abstand der Naht zur Kante (Standard: 3)
   --ecke ein|aus|mitte            Ausrichtung des Ecklochs (Standard: ein,
                                   wie die einlaufende Kante)
+  --stegbreite <mm>               Abstand zwischen den Hörnern der Uhr (Uhrarmband)
+  --armumfang <mm>                Umfang des Handgelenks (Uhrarmband)
+  --hornabstand <mm>              Länge der Uhr, Lug-to-Lug (Uhrarmband)
   --papier a4|a3|letter           Papierformat für PDF (Standard: a4)
   --rand <mm>                     Unbedruckter Blattrand für PDF (Standard: 10)
   --klebekante <mm>               Überlappung der Blätter für PDF (Standard: 10)
@@ -62,6 +70,9 @@ struct Optionen {
     lochabstand: Option<f64>,
     kantenabstand: Option<f64>,
     ecke: Option<String>,
+    stegbreite: Option<f64>,
+    armumfang: Option<f64>,
+    hornabstand: Option<f64>,
     papier: Option<String>,
     rand: Option<f64>,
     klebekante: Option<f64>,
@@ -93,7 +104,8 @@ fn ausfuehren(args: &[String]) -> Result<String, String> {
         Some("pdf") => erzeugen(lies_optionen(&args[1..])?, Format::Pdf),
         Some("vorlage") => match args.get(1).map(String::as_str) {
             Some("bifold") => vorlage_bifold(lies_optionen(&args[2..])?),
-            _ => Err("Bekannte Vorlagen: bifold".into()),
+            Some("uhrarmband") => vorlage_uhrarmband(lies_optionen(&args[2..])?),
+            _ => Err("Bekannte Vorlagen: bifold, uhrarmband".into()),
         },
         _ => Ok(HILFE.into()),
     }
@@ -129,6 +141,9 @@ fn lies_optionen(args: &[String]) -> Result<Optionen, String> {
             "--lochabstand" => o.lochabstand = Some(zahl(a, it.next())?),
             "--kantenabstand" => o.kantenabstand = Some(zahl(a, it.next())?),
             "--ecke" => o.ecke = it.next().cloned(),
+            "--stegbreite" => o.stegbreite = Some(zahl(a, it.next())?),
+            "--armumfang" => o.armumfang = Some(zahl(a, it.next())?),
+            "--hornabstand" => o.hornabstand = Some(zahl(a, it.next())?),
             "--papier" => o.papier = it.next().cloned(),
             "--rand" => o.rand = Some(zahl(a, it.next())?),
             "--klebekante" => o.klebekante = Some(zahl(a, it.next())?),
@@ -183,6 +198,46 @@ fn vorlage_bifold(o: Optionen) -> Result<String, String> {
     speichern(&ausgabe, &pdf, o.ueberschreiben)?;
     let mut meldung = format!(
         "Bifold-Geldbörse, {} Teile, {blaetter} Blätter plus Prüfseite, gespeichert in {}\n",
+        v.teile.len(),
+        ausgabe.display()
+    );
+    for s in &v.schritte {
+        meldung.push_str("\n- ");
+        meldung.push_str(s);
+    }
+    Ok(meldung)
+}
+
+/// Das Uhrarmband als PDF mit Nähanleitung auf der Konsole.
+fn vorlage_uhrarmband(o: Optionen) -> Result<String, String> {
+    use lepaca_core::vorlage::{UhrarmbandFehler, VorlagenFehler};
+    let ausgabe = o
+        .ausgabe
+        .clone()
+        .ok_or("Bitte --ausgabe <datei.pdf> angeben.")?;
+    let v = lepaca_core::vorlage::uhrarmband(
+        mm("stegbreite", o.stegbreite)?,
+        mm("armumfang", o.armumfang)?,
+        mm("hornabstand", Some(o.hornabstand.unwrap_or(48.0)))?,
+    )
+    .map_err(|e| match e {
+        VorlagenFehler::Uhrarmband(UhrarmbandFehler::Stegbreite) => {
+            "--stegbreite muss zwischen 8 und 36 mm liegen.".to_string()
+        }
+        VorlagenFehler::Uhrarmband(UhrarmbandFehler::Armumfang) => {
+            "--armumfang muss zwischen 110 und 280 mm liegen.".to_string()
+        }
+        VorlagenFehler::Uhrarmband(UhrarmbandFehler::Hornabstand) => {
+            "--hornabstand muss zwischen 20 und 70 mm liegen und höchstens den halben Armumfang betragen."
+                .to_string()
+        }
+        e => format!("Vorlage fehlerhaft: {e:?}"),
+    })?;
+    let (pdf, blaetter) = lepaca_io::pdf::muster_pdf(&v.teile, kachel_einstellung(&o)?)
+        .map_err(|e| format!("Kein PDF möglich: {e:?}"))?;
+    speichern(&ausgabe, &pdf, o.ueberschreiben)?;
+    let mut meldung = format!(
+        "Uhrarmband, {} Teile, {blaetter} Blätter plus Prüfseite, gespeichert in {}\n",
         v.teile.len(),
         ausgabe.display()
     );
