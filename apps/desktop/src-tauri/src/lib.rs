@@ -1113,6 +1113,38 @@ fn vorlage(name: String) -> Result<VorlageDaten, String> {
     vorlage_laden(&name)
 }
 
+/// Uhrarmband aus Stegbreite, Armumfang und Hornabstand (mm).
+pub fn uhrarmband_laden(
+    stegbreite: f64,
+    armumfang: f64,
+    hornabstand: f64,
+) -> Result<VorlageDaten, String> {
+    use lepaca_core::vorlage::{UhrarmbandFehler, VorlagenFehler};
+    let v = lepaca_core::vorlage::uhrarmband(
+        mm(stegbreite, "vorlage.stegbreite")?,
+        mm(armumfang, "vorlage.armumfang")?,
+        mm(hornabstand, "vorlage.hornabstand")?,
+    )
+    .map_err(|f| {
+        match f {
+            VorlagenFehler::Uhrarmband(UhrarmbandFehler::Stegbreite) => "vorlage.stegbreite",
+            VorlagenFehler::Uhrarmband(UhrarmbandFehler::Armumfang) => "vorlage.armumfang",
+            VorlagenFehler::Uhrarmband(UhrarmbandFehler::Hornabstand) => "vorlage.hornabstand",
+            _ => "vorlage.fehler",
+        }
+        .to_string()
+    })?;
+    Ok(VorlageDaten {
+        teile: v.teile.iter().map(teil_nach).collect(),
+        schritte: v.schritte,
+    })
+}
+
+#[tauri::command]
+fn uhrarmband(stegbreite: f64, armumfang: f64, hornabstand: f64) -> Result<VorlageDaten, String> {
+    uhrarmband_laden(stegbreite, armumfang, hornabstand)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DruckDaten {
@@ -1214,6 +1246,7 @@ pub fn starten() {
             ausschnitte_loesen,
             montage_loecher,
             vorlage,
+            uhrarmband,
             pdf_exportieren
         ])
         .run(tauri::generate_context!());
@@ -1414,6 +1447,49 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF-1.4"));
         assert_eq!(blaetter, 2);
         assert_eq!(super::pdf(&[], &druck).unwrap_err(), "export.leer");
+    }
+
+    #[test]
+    fn das_uhrarmband_kommt_mit_dornloechern_und_genaehtem_futter_an() {
+        let v = uhrarmband_laden(22.0, 185.0, 48.0).unwrap();
+        let namen: Vec<_> = v.teile.iter().filter_map(|t| t.name.clone()).collect();
+        assert_eq!(
+            namen,
+            [
+                "Langteil Oberleder",
+                "Langteil Futter",
+                "Kurzteil Oberleder",
+                "Kurzteil Futter",
+                "Schlaufe"
+            ]
+        );
+        let json = serde_json::to_string(&v.teile).unwrap();
+        let zurueck: Vec<TeilDaten> = serde_json::from_str(&json).unwrap();
+        for t in &zurueck {
+            assert!(geometrie(t).unwrap().stichfehler.is_none());
+        }
+        assert_eq!(zurueck[0].ausschnitte.len(), 7);
+        assert_eq!(zurueck[1].ausschnitte.len(), 7);
+        let m = montage(&zurueck).unwrap();
+        assert!(m.iter().all(|x| x.kantennah == 0 && x.zu_dicht == 0));
+        // Das Futter bekommt die Nahtlöcher des Oberleders.
+        assert!(m[1].loecher.len() > 50);
+    }
+
+    #[test]
+    fn ein_uhrarmband_mit_unsinnigen_massen_nennt_das_falsche_feld() {
+        assert_eq!(
+            uhrarmband_laden(4.0, 185.0, 48.0).unwrap_err(),
+            "vorlage.stegbreite"
+        );
+        assert_eq!(
+            uhrarmband_laden(22.0, 40.0, 48.0).unwrap_err(),
+            "vorlage.armumfang"
+        );
+        assert_eq!(
+            uhrarmband_laden(22.0, 185.0, f64::NAN).unwrap_err(),
+            "vorlage.hornabstand"
+        );
     }
 
     #[test]

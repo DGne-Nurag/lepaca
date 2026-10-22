@@ -15,7 +15,9 @@ import {
   skizzeLoesen,
   skizzeSofort,
   uebernommeneSofort,
+  uhrarmbandErzeugen,
   vorlageLaden,
+  type Vorlage,
 } from "./kern";
 import {
   istMass,
@@ -161,7 +163,6 @@ function symbolKnopf(name: string, taste: string, kuerzel: string, inhalt: strin
 const knopfZurueck = symbolKnopf(t("rueckgaengig"), "Strg+Z", "Control+Z", '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 010 10h-3"/>');
 const knopfVor = symbolKnopf(t("wiederholen"), "Strg+Umschalt+Z", "Control+Shift+Z", '<path d="M15 14l5-5-5-5"/><path d="M20 9H9a5 5 0 000 10h3"/>');
 const knopfAlles = symbolKnopf(t("alles.zeigen"), "0", "0", '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>');
-const knopfVorlage = el("button", { type: "button", title: t("vorlage.bifold.titel") }, t("vorlage.bifold"));
 const knopfMasse = el("button", { type: "button", class: "schalter", "aria-pressed": "true", title: `${t("ansicht.masse.titel")} (M)`, "aria-keyshortcuts": "M" }, t("ansicht.masse"));
 // Zuschnitt und Zusammenbau sind zwei Ansichten desselben Musters; Z wechselt.
 const knopfZuschnitt = el("button", { type: "button", "aria-pressed": "true", title: `${t("ansicht.zuschnitt.titel")} (Z)` }, t("ansicht.zuschnitt"));
@@ -172,6 +173,110 @@ const knopfExport = el(
   el("span", { class: "lang" }, t("export")),
   el("span", { class: "kurz" }, t("export.kurz")),
 );
+// ---------------------------------------------------------------- Vorlagen
+
+/** Zuletzt eingegebene Maße des Uhrarmbands (mm), bleiben in der Sitzung. */
+const uhrarmbandMasse = { stegbreite: 22, armumfang: 180, hornabstand: 48 };
+
+/** Menü „Vorlagen“: Bifold einsetzen oder ein Uhrarmband erzeugen. */
+function vorlagenMenue(): HTMLDetailsElement {
+  const bifold = el("button", { type: "button", title: t("vorlage.bifold.titel") }, t("vorlage.einsetzen"));
+  bifold.addEventListener("click", () => {
+    menue.open = false;
+    void vorlageEinsetzen();
+  });
+
+  const fehler = el("p", { class: "meldung fehler", role: "alert" });
+  const feld = (schluessel: "stegbreite" | "armumfang" | "hornabstand", einheit: string, faktor: number) => {
+    const id = `vorlage-${schluessel}`;
+    const eingabe = el("input", { id, type: "text", inputmode: "decimal", spellcheck: "false", value: zahl(uhrarmbandMasse[schluessel] / faktor) });
+    const lesen = (): number | null => {
+      const x = leseZahl(eingabe.value);
+      return x === null ? null : x * faktor;
+    };
+    const knoten = el(
+      "div",
+      { class: "feld" },
+      el("label", { for: id, title: t(`vorlage.${schluessel}.titel`) }, t(`vorlage.${schluessel}`)),
+      el("span", { class: "mit-einheit" }, eingabe, el("span", { class: "einheit" }, einheit)),
+    );
+    return { knoten, eingabe, lesen };
+  };
+  // Den Armumfang misst man mit dem Maßband in Zentimetern.
+  const felder = {
+    stegbreite: feld("stegbreite", "mm", 1),
+    armumfang: feld("armumfang", "cm", 10),
+    hornabstand: feld("hornabstand", "mm", 1),
+  };
+  const erzeugen = el("button", { type: "submit", class: "primaer" }, t("vorlage.erzeugen"));
+  const form = el(
+    "form",
+    { class: "vorlage-form" },
+    felder.stegbreite.knoten,
+    felder.armumfang.knoten,
+    felder.hornabstand.knoten,
+    fehler,
+    el("div", { class: "knopfzeile knopfzeile-eng" }, erzeugen),
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    for (const f of Object.values(felder)) f.eingabe.removeAttribute("aria-invalid");
+    fehler.textContent = "";
+    const werte = { stegbreite: felder.stegbreite.lesen(), armumfang: felder.armumfang.lesen(), hornabstand: felder.hornabstand.lesen() };
+    for (const [k, x] of Object.entries(werte)) {
+      if (x === null) {
+        felder[k as keyof typeof felder].eingabe.setAttribute("aria-invalid", "true");
+        fehler.textContent = t("eingabe.zahl");
+        return;
+      }
+    }
+    const { stegbreite, armumfang, hornabstand } = werte as typeof uhrarmbandMasse;
+    uhrarmbandErzeugen(stegbreite, armumfang, hornabstand)
+      .then((v) => {
+        Object.assign(uhrarmbandMasse, { stegbreite, armumfang, hornabstand });
+        menue.open = false;
+        return vorlageAnwenden(v, t("vorlage.uhrarmband.name", { s: zahl(stegbreite) }), t("vorlage.uhrarmband.geladen"));
+      })
+      .catch((err: unknown) => {
+        const code = String(err);
+        fehler.textContent = fehlertext(code);
+        const k = code.replace("vorlage.", "");
+        if (k in felder) {
+          const f = felder[k as keyof typeof felder].eingabe;
+          f.setAttribute("aria-invalid", "true");
+          f.focus();
+        }
+      });
+  });
+
+  const menue = el(
+    "details",
+    { class: "vorlagen" },
+    el("summary", { title: t("vorlagen.titel") }, t("vorlagen")),
+    el(
+      "div",
+      { class: "vorlagen-feld" },
+      el("section", {}, el("h2", {}, t("vorlage.bifold")), el("p", { class: "meldung" }, t("vorlage.bifold.info")), el("div", { class: "knopfzeile knopfzeile-eng" }, bifold)),
+      el("section", {}, el("h2", {}, t("vorlage.uhrarmband")), el("p", { class: "meldung" }, t("vorlage.uhrarmband.info")), form),
+    ),
+  );
+  // Esc und ein Klick daneben schließen das Menü.
+  menue.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && menue.open) {
+      e.stopPropagation();
+      menue.open = false;
+      menue.querySelector("summary")?.focus();
+    }
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (menue.open && !menue.contains(e.target as Node)) menue.open = false;
+  });
+  menue.addEventListener("toggle", () => {
+    if (menue.open) felder.stegbreite.eingabe.focus();
+  });
+  return menue;
+}
+
 // Zeichen: ein Lederteil mit Stichlinie.
 const marke = el("span", { class: "marke" });
 marke.append(icon('<rect x="2.5" y="4.5" width="19" height="15" rx="3.5" class="marke-leder"/><rect x="5.5" y="7.5" width="13" height="9" rx="1.5" class="marke-naht"/>'), el("span", { class: "marke-text" }, "lepaca"));
@@ -183,7 +288,7 @@ const kopf = el(
   marke,
   el("div", { class: "titel-block" }, musterTitel, musterInfo),
   el("div", { class: "ansicht-wahl" }, el("div", { class: "segment", role: "group", "aria-label": t("ansicht") }, knopfZuschnitt, knopfZusammenbau), knopfMasse, knopfAlles),
-  el("div", { class: "kopf-rechts" }, knopfZurueck, knopfVor, el("span", { class: "trenner" }), knopfVorlage, knopfExport),
+  el("div", { class: "kopf-rechts" }, knopfZurueck, knopfVor, el("span", { class: "trenner" }), vorlagenMenue(), knopfExport),
 );
 
 const canvas = el("canvas", { class: "flaeche", tabindex: "0", role: "img" });
@@ -1508,25 +1613,41 @@ function montageFelder(g: Teil): HTMLElement[] {
 
 async function vorlageEinsetzen(): Promise<void> {
   try {
-    const v = await vorlageLaden("bifold");
-    aendern((m) => {
-      const teile: Teil[] = [];
-      for (const x of v.teile) {
-        teile.push({ id: neueId({ ...m, teile }), name: x.name ?? "", form: x.form, x: x.x, y: x.y, naht: x.stiche, montage: x.montage });
-      }
-      m.teile = teile;
-      m.anleitung = v.schritte;
-      m.name = t("vorlage.bifold.name");
-    });
-    auswahl = null;
-    // Erst die Geometrie, dann passt „Alles zeigen“.
-    await Promise.all(muster().teile.map(pfadeFuer));
-    ansicht.allesZeigen(muster(), zusammenbau);
-    melden(t("vorlage.geladen"));
-    allesAktualisieren();
+    await vorlageAnwenden(await vorlageLaden("bifold"), t("vorlage.bifold.name"), t("vorlage.geladen"));
   } catch (e) {
     fehlerMelden(e);
   }
+}
+
+/** Ersetzt das Muster durch eine Vorlage (rückgängig machbar). */
+async function vorlageAnwenden(v: Vorlage, name: string, meldung: string): Promise<void> {
+  aendern((m) => {
+    const teile: Teil[] = [];
+    for (const x of v.teile) {
+      teile.push({
+        id: neueId({ ...m, teile }),
+        name: x.name ?? "",
+        form: x.form,
+        x: x.x,
+        y: x.y,
+        naht: x.stiche,
+        montage: x.montage,
+        // Ausschnitte (z. B. Dornlöcher) heißen nach ihrer Nummer, wenn
+        // die Vorlage keinen Namen mitbringt.
+        ausschnitte: x.ausschnitte.map((a, i) => ({ ...a, name: a.name ?? t("ausschnitt.nummer", { n: i + 1 }) })),
+        abstandsmasse: x.abstandsmasse,
+      });
+    }
+    m.teile = teile;
+    m.anleitung = v.schritte;
+    m.name = name;
+  });
+  auswahl = null;
+  // Erst die Geometrie, dann passt „Alles zeigen“.
+  await Promise.all(muster().teile.map(pfadeFuer));
+  ansicht.allesZeigen(muster(), zusammenbau);
+  melden(meldung);
+  allesAktualisieren();
 }
 
 // ---------------------------------------------------------------- Zeiger
@@ -1884,7 +2005,6 @@ knopfAlles.addEventListener("click", () => {
 knopfMasse.addEventListener("click", masseUmschalten);
 knopfZuschnitt.addEventListener("click", () => zusammenbau && zusammenbauUmschalten());
 knopfZusammenbau.addEventListener("click", () => zusammenbau || zusammenbauUmschalten());
-knopfVorlage.addEventListener("click", () => void vorlageEinsetzen());
 knopfExport.addEventListener("click", () => void exportieren());
 knopfTest.addEventListener("click", () => void leistungstest());
 

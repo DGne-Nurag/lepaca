@@ -278,6 +278,11 @@ export function vorlageLaden(name: string): Promise<Vorlage> {
   return invoke<Vorlage>("vorlage", { name });
 }
 
+/** Uhrarmband erzeugen; alle Maße in mm. */
+export function uhrarmbandErzeugen(stegbreite: number, armumfang: number, hornabstand: number): Promise<Vorlage> {
+  return invoke<Vorlage>("uhrarmband", { stegbreite, armumfang, hornabstand });
+}
+
 /** Punkt-in-Polygon (gerade/ungerade Regel). */
 export function enthaelt(punkte: P[], x: number, y: number): boolean {
   let drin = false;

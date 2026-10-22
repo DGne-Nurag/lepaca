@@ -729,3 +729,77 @@ button.klein {
 .anleitung li {
   margin-bottom: 6px;
 }
+
+/* Vorlagen-Menü in der Kopfzeile: schwebt über der Fläche, deshalb als
+   einziges mit Schatten. */
+.vorlagen {
+  position: relative;
+}
+
+.vorlagen summary {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--steuer);
+  border-radius: 6px;
+  background: var(--panel);
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+
+.vorlagen summary::-webkit-details-marker {
+  display: none;
+}
+
+.vorlagen summary::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-left: 8px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.vorlagen summary:hover {
+  background: var(--hover);
+}
+
+.vorlagen[open] summary {
+  background: var(--aktiv);
+  border-color: var(--aktiv);
+}
+
+.vorlagen-feld {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 10;
+  width: 300px;
+  padding: 4px 16px 16px;
+  background: var(--panel);
+  border: 1px solid var(--linie);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+}
+
+.vorlagen-feld section + section {
+  margin-top: 16px;
+  border-top: 1px solid var(--linie);
+}
+
+.vorlagen-feld h2 {
+  margin: 16px 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.vorlagen-feld .meldung {
+  margin: 0 0 12px;
+}
+
+.vorlage-form .meldung.fehler:empty {
+  display: none;
+}
