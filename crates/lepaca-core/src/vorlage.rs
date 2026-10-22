@@ -13,6 +13,12 @@ use crate::muster::{Montage, Musterteil, Naht, Nahtkanten, Teil, TeilForm};
 use crate::skizze::{self, Bedingung, SkizzenFehler};
 use crate::stichlinie::{Eckausrichtung, Einstellung, StichFehler, Stichloch};
 
+mod uhrarmband;
+pub use uhrarmband::{
+    UhrarmbandAbgeleitet, UhrarmbandFehler, UhrarmbandMasse, uhrarmband, uhrarmband_abgeleitet,
+    uhrarmband_mit,
+};
+
 /// Eine Vorlage: Teile und die Nähanleitung in Schritten.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Vorlage {
@@ -26,6 +32,8 @@ pub enum VorlagenFehler {
     Stich(StichFehler),
     /// Die Skizze ist nicht vollständig bestimmt.
     Unbestimmt,
+    /// Eine Eingabe des Uhrarmbands liegt außerhalb des sinnvollen Bereichs.
+    Uhrarmband(UhrarmbandFehler),
 }
 
 impl From<SkizzenFehler> for VorlagenFehler {
@@ -40,12 +48,12 @@ impl From<StichFehler> for VorlagenFehler {
     }
 }
 
-fn mm(x: f64) -> Mm {
+pub(crate) fn mm(x: f64) -> Mm {
     // Nur mit endlichen Werten aufgerufen; null fällt bei der Prüfung auf.
     Mm::neu(x).unwrap_or(Mm::NULL)
 }
 
-fn p(x: f64, y: f64) -> Punkt {
+pub(crate) fn p(x: f64, y: f64) -> Punkt {
     Punkt::neu(x, y)
 }
 
@@ -116,7 +124,11 @@ fn bogen(ziel: Punkt, r: f64) -> PfadElement {
 }
 
 /// Löst eine Skizze und verlangt, dass sie vollständig bestimmt ist.
-fn bestimmt(pfad: &Pfad, geschlossen: bool, b: &[Bedingung]) -> Result<Pfad, VorlagenFehler> {
+pub(crate) fn bestimmt(
+    pfad: &Pfad,
+    geschlossen: bool,
+    b: &[Bedingung],
+) -> Result<Pfad, VorlagenFehler> {
     let e = skizze::loesen(pfad, geschlossen, b)?;
     if e.freiheitsgrade != 0 {
         return Err(VorlagenFehler::Unbestimmt);

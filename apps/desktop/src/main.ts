@@ -1,5 +1,8 @@
 // lepaca – Pattern Viewer mit erster Werkzeugleiste.
 
+// Schrift wird mit der App ausgeliefert (offline, auf allen Plattformen gleich).
+import "@fontsource-variable/ibm-plex-sans/wght.css";
+
 import { Ansicht, lage, PX_PRO_MM, type Darstellung, type Entwurf, type Vorschau } from "./ansicht";
 import {
   ausschnitteLoesen,
@@ -12,7 +15,9 @@ import {
   skizzeLoesen,
   skizzeSofort,
   uebernommeneSofort,
+  uhrarmbandErzeugen,
   vorlageLaden,
+  type Vorlage,
 } from "./kern";
 import {
   istMass,
@@ -30,6 +35,7 @@ import {
   type Ecke,
   type Eisen,
   type Bedingung,
+  type Druck,
   type Element as Stueck,
   type Form,
   type Muster,
@@ -147,27 +153,142 @@ for (const w of WERKZEUGE) {
   werkzeugleiste.append(b);
 }
 
-const knopfZurueck = el("button", { type: "button", title: `${t("rueckgaengig")} (Strg+Z)`, "aria-keyshortcuts": "Control+Z" }, t("rueckgaengig"));
-const knopfVor = el("button", { type: "button", title: `${t("wiederholen")} (Strg+Umschalt+Z)`, "aria-keyshortcuts": "Control+Shift+Z" }, t("wiederholen"));
-const knopfAlles = el("button", { type: "button", title: `${t("alles.zeigen")} (0)`, "aria-keyshortcuts": "0" }, t("alles.zeigen"));
-const knopfVorlage = el("button", { type: "button", title: t("vorlage.bifold.titel") }, t("vorlage.bifold"));
-const knopfMasse = el("button", { type: "button", "aria-pressed": "true", title: `${t("ansicht.masse.titel")} (M)`, "aria-keyshortcuts": "M" }, t("ansicht.masse"));
+/** Knopf mit Symbol statt Text; Name für Screenreader und Tooltip. */
+function symbolKnopf(name: string, taste: string, kuerzel: string, inhalt: string): HTMLButtonElement {
+  const b = el("button", { type: "button", class: "symbol-knopf", title: `${name} (${taste})`, "aria-label": name, "aria-keyshortcuts": kuerzel });
+  b.append(icon(inhalt));
+  return b;
+}
+
+const knopfZurueck = symbolKnopf(t("rueckgaengig"), "Strg+Z", "Control+Z", '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 010 10h-3"/>');
+const knopfVor = symbolKnopf(t("wiederholen"), "Strg+Umschalt+Z", "Control+Shift+Z", '<path d="M15 14l5-5-5-5"/><path d="M20 9H9a5 5 0 000 10h3"/>');
+const knopfAlles = symbolKnopf(t("alles.zeigen"), "0", "0", '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>');
+const knopfMasse = el("button", { type: "button", class: "schalter", "aria-pressed": "true", title: `${t("ansicht.masse.titel")} (M)`, "aria-keyshortcuts": "M" }, t("ansicht.masse"));
+// Zuschnitt und Zusammenbau sind zwei Ansichten desselben Musters; Z wechselt.
+const knopfZuschnitt = el("button", { type: "button", "aria-pressed": "true", title: `${t("ansicht.zuschnitt.titel")} (Z)` }, t("ansicht.zuschnitt"));
 const knopfZusammenbau = el("button", { type: "button", "aria-pressed": "false", title: `${t("ansicht.zusammenbau.titel")} (Z)`, "aria-keyshortcuts": "Z" }, t("ansicht.zusammenbau"));
-const knopfExport = el("button", { type: "button", class: "primaer", title: `${t("export")} (Strg+P)`, "aria-keyshortcuts": "Control+P" }, t("export"));
+const knopfExport = el(
+  "button",
+  { type: "button", class: "primaer", title: `${t("export")} (Strg+P)`, "aria-label": t("export"), "aria-keyshortcuts": "Control+P" },
+  el("span", { class: "lang" }, t("export")),
+  el("span", { class: "kurz" }, t("export.kurz")),
+);
+// ---------------------------------------------------------------- Vorlagen
+
+/** Zuletzt eingegebene Maße des Uhrarmbands (mm), bleiben in der Sitzung. */
+const uhrarmbandMasse = { stegbreite: 22, armumfang: 180, hornabstand: 48 };
+
+/** Menü „Vorlagen“: Bifold einsetzen oder ein Uhrarmband erzeugen. */
+function vorlagenMenue(): HTMLDetailsElement {
+  const bifold = el("button", { type: "button", title: t("vorlage.bifold.titel") }, t("vorlage.einsetzen"));
+  bifold.addEventListener("click", () => {
+    menue.open = false;
+    void vorlageEinsetzen();
+  });
+
+  const fehler = el("p", { class: "meldung fehler", role: "alert" });
+  const feld = (schluessel: "stegbreite" | "armumfang" | "hornabstand", einheit: string, faktor: number) => {
+    const id = `vorlage-${schluessel}`;
+    const eingabe = el("input", { id, type: "text", inputmode: "decimal", spellcheck: "false", value: zahl(uhrarmbandMasse[schluessel] / faktor) });
+    const lesen = (): number | null => {
+      const x = leseZahl(eingabe.value);
+      return x === null ? null : x * faktor;
+    };
+    const knoten = el(
+      "div",
+      { class: "feld" },
+      el("label", { for: id, title: t(`vorlage.${schluessel}.titel`) }, t(`vorlage.${schluessel}`)),
+      el("span", { class: "mit-einheit" }, eingabe, el("span", { class: "einheit" }, einheit)),
+    );
+    return { knoten, eingabe, lesen };
+  };
+  // Den Armumfang misst man mit dem Maßband in Zentimetern.
+  const felder = {
+    stegbreite: feld("stegbreite", "mm", 1),
+    armumfang: feld("armumfang", "cm", 10),
+    hornabstand: feld("hornabstand", "mm", 1),
+  };
+  const erzeugen = el("button", { type: "submit", class: "primaer" }, t("vorlage.erzeugen"));
+  const form = el(
+    "form",
+    { class: "vorlage-form" },
+    felder.stegbreite.knoten,
+    felder.armumfang.knoten,
+    felder.hornabstand.knoten,
+    fehler,
+    el("div", { class: "knopfzeile knopfzeile-eng" }, erzeugen),
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    for (const f of Object.values(felder)) f.eingabe.removeAttribute("aria-invalid");
+    fehler.textContent = "";
+    const werte = { stegbreite: felder.stegbreite.lesen(), armumfang: felder.armumfang.lesen(), hornabstand: felder.hornabstand.lesen() };
+    for (const [k, x] of Object.entries(werte)) {
+      if (x === null) {
+        felder[k as keyof typeof felder].eingabe.setAttribute("aria-invalid", "true");
+        fehler.textContent = t("eingabe.zahl");
+        return;
+      }
+    }
+    const { stegbreite, armumfang, hornabstand } = werte as typeof uhrarmbandMasse;
+    uhrarmbandErzeugen(stegbreite, armumfang, hornabstand)
+      .then((v) => {
+        Object.assign(uhrarmbandMasse, { stegbreite, armumfang, hornabstand });
+        menue.open = false;
+        return vorlageAnwenden(v, t("vorlage.uhrarmband.name", { s: zahl(stegbreite) }), t("vorlage.uhrarmband.geladen"));
+      })
+      .catch((err: unknown) => {
+        const code = String(err);
+        fehler.textContent = fehlertext(code);
+        const k = code.replace("vorlage.", "");
+        if (k in felder) {
+          const f = felder[k as keyof typeof felder].eingabe;
+          f.setAttribute("aria-invalid", "true");
+          f.focus();
+        }
+      });
+  });
+
+  const menue = el(
+    "details",
+    { class: "vorlagen" },
+    el("summary", { title: t("vorlagen.titel") }, t("vorlagen")),
+    el(
+      "div",
+      { class: "vorlagen-feld" },
+      el("section", {}, el("h2", {}, t("vorlage.bifold")), el("p", { class: "meldung" }, t("vorlage.bifold.info")), el("div", { class: "knopfzeile knopfzeile-eng" }, bifold)),
+      el("section", {}, el("h2", {}, t("vorlage.uhrarmband")), el("p", { class: "meldung" }, t("vorlage.uhrarmband.info")), form),
+    ),
+  );
+  // Esc und ein Klick daneben schließen das Menü.
+  menue.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && menue.open) {
+      e.stopPropagation();
+      menue.open = false;
+      menue.querySelector("summary")?.focus();
+    }
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (menue.open && !menue.contains(e.target as Node)) menue.open = false;
+  });
+  menue.addEventListener("toggle", () => {
+    if (menue.open) felder.stegbreite.eingabe.focus();
+  });
+  return menue;
+}
+
+// Zeichen: ein Lederteil mit Stichlinie.
+const marke = el("span", { class: "marke" });
+marke.append(icon('<rect x="2.5" y="4.5" width="19" height="15" rx="3.5" class="marke-leder"/><rect x="5.5" y="7.5" width="13" height="9" rx="1.5" class="marke-naht"/>'), el("span", { class: "marke-text" }, "lepaca"));
+const musterTitel = el("h1", { class: "muster-titel" });
+const musterInfo = el("span", { class: "muster-info" });
 const kopf = el(
   "header",
   { class: "kopf" },
-  el("span", { class: "marke" }, "lepaca"),
-  knopfZurueck,
-  knopfVor,
-  el("span", { class: "trenner" }),
-  knopfAlles,
-  knopfMasse,
-  knopfZusammenbau,
-  el("span", { class: "trenner" }),
-  knopfVorlage,
-  el("span", { class: "fueller" }),
-  knopfExport,
+  marke,
+  el("div", { class: "titel-block" }, musterTitel, musterInfo),
+  el("div", { class: "ansicht-wahl" }, el("div", { class: "segment", role: "group", "aria-label": t("ansicht") }, knopfZuschnitt, knopfZusammenbau), knopfMasse, knopfAlles),
+  el("div", { class: "kopf-rechts" }, knopfZurueck, knopfVor, el("span", { class: "trenner" }), vorlagenMenue(), knopfExport),
 );
 
 const canvas = el("canvas", { class: "flaeche", tabindex: "0", role: "img" });
@@ -175,20 +296,24 @@ const leerHinweis = el("p", { class: "leer-hinweis" }, t("leer"));
 const mitte = el("main", { class: "mitte" }, canvas, leerHinweis);
 
 const teileListe = el("ul", { class: "teile-liste", role: "listbox", "aria-label": t("teile") });
+const teileAnzahl = el("span", { class: "anzahl" });
 const eigenschaften = el("div", { class: "eigenschaften" });
 const seite = el(
   "aside",
   { class: "seite" },
-  el("h2", {}, t("teile")),
+  el("h2", { class: "mit-anzahl" }, t("teile"), teileAnzahl),
   teileListe,
   eigenschaften,
 );
 
 const statusPosition = el("span", { class: "status-position" });
-const statusZoom = el("span", { class: "status-zoom" });
+const statusZoom = el("span", { class: "status-zoom", title: "Zoom" });
 const statusMeldung = el("span", { class: "status-meldung", role: "status", "aria-live": "polite" });
-const knopfTest = el("button", { type: "button", class: "klein", title: t("leistungstest.titel") }, t("leistungstest"));
-const fuss = el("footer", { class: "fuss" }, statusPosition, statusZoom, statusMeldung, el("span", { class: "fueller" }), knopfTest);
+// Der Leistungstest (ADR 0002) ist ein Werkzeug für Entwickler: sichtbar nur
+// im Entwicklungsmodus, sonst über Strg+Alt+Umschalt+L erreichbar.
+const knopfTest = el("button", { type: "button", class: "klein", title: `${t("leistungstest.titel")} (Strg+Alt+Umschalt+L)` }, t("leistungstest"));
+const fuss = el("footer", { class: "fuss" }, statusZoom, statusMeldung, el("span", { class: "fueller" }), statusPosition);
+if (import.meta.env.DEV) fuss.append(knopfTest);
 
 app.append(kopf, werkzeugleiste, mitte, seite, fuss);
 
@@ -250,7 +375,7 @@ function montageLaden(): void {
       neuZeichnen();
       eigenschaftenAktualisieren();
     })
-    .catch((e: unknown) => melden(fehlertext(String(e))));
+    .catch((e: unknown) => fehlerMelden(e));
 }
 
 /** Fehlende Geometrie nachladen und danach neu zeichnen. */
@@ -262,7 +387,7 @@ function geometrieLaden(): void {
       neuZeichnen();
       eigenschaftenAktualisieren();
     })
-    .catch((e: unknown) => melden(fehlertext(String(e))));
+    .catch((e: unknown) => fehlerMelden(e));
 }
 
 // ---------------------------------------------------------------- Pfad zeichnen
@@ -446,7 +571,12 @@ function allesAktualisieren(): void {
   skizzeLaden();
   montageLaden();
   knopfMasse.setAttribute("aria-pressed", String(zeigeMasse));
+  knopfZuschnitt.setAttribute("aria-pressed", String(!zusammenbau));
   knopfZusammenbau.setAttribute("aria-pressed", String(zusammenbau));
+  const n = muster().teile.length;
+  musterTitel.textContent = muster().name ?? t("muster.neu");
+  musterInfo.textContent = n === 1 ? t("teile.eins") : t("teile.anzahl", { n });
+  teileAnzahl.textContent = n > 0 ? String(n) : "";
   listeAktualisieren();
   eigenschaftenAktualisieren();
   knopfZurueck.disabled = !verlauf.kannZurueck;
@@ -456,8 +586,15 @@ function allesAktualisieren(): void {
   neuZeichnen();
 }
 
-function melden(text: string): void {
+/** Meldung in der Statuszeile; technische Details nur im Tooltip. */
+function melden(text: string, details = ""): void {
   statusMeldung.textContent = text;
+  statusMeldung.title = details;
+}
+
+/** Fehler aus dem Kern melden; der technische Code steht im Tooltip. */
+function fehlerMelden(e: unknown): void {
+  melden(fehlertext(String(e)), String(e));
 }
 
 // ---------------------------------------------------------------- Änderungen
@@ -543,7 +680,7 @@ function listeAktualisieren(): void {
     return;
   }
   for (const x of muster().teile) {
-    const li = el("li", { role: "option", tabindex: "0", "aria-selected": String(x.id === auswahl) }, x.name);
+    const li = el("li", { role: "option", tabindex: "0", "aria-selected": String(x.id === auswahl) }, ...teilZeile(x));
     li.addEventListener("click", () => {
       auswahl = x.id;
       allesAktualisieren();
@@ -557,6 +694,33 @@ function listeAktualisieren(): void {
     });
     teileListe.append(li);
   }
+}
+
+/** Umriss als kleines Bild, Name und Außenmaße eines Teils für die Liste. */
+function teilZeile(x: Teil): Node[] {
+  const p = pfadeSofort(x);
+  const bild = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  bild.setAttribute("class", "umriss");
+  bild.setAttribute("aria-hidden", "true");
+  const masse = el("span", { class: "teil-masse" });
+  if (p && p.geometrie.kontur.length > 1) {
+    const [x0, y0] = p.min;
+    const b = p.max[0] - x0;
+    const h = p.max[1] - y0;
+    // Etwas Rand, damit die Linie nicht abgeschnitten wird.
+    const r = Math.max(b, h) * 0.06;
+    bild.setAttribute("viewBox", `${x0 - r} ${y0 - r} ${b + 2 * r} ${h + 2 * r}`);
+    const pfad = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const d = p.geometrie.kontur.map(([px, py], i) => `${i === 0 ? "M" : "L"}${px} ${py}`).join("");
+    pfad.setAttribute("d", p.geometrie.geschlossen ? `${d}Z` : d);
+    if (!p.geometrie.geschlossen) pfad.setAttribute("class", "offen");
+    bild.append(pfad);
+    // Offene Linien (z. B. eine Aufnähnaht) haben eine Länge, keine Fläche.
+    const k = p.geometrie.kontur;
+    const laenge = k.slice(1).reduce((l, q, i) => l + Math.hypot(q[0] - k[i]![0], q[1] - k[i]![1]), 0);
+    masse.textContent = p.geometrie.geschlossen ? `${zahl(b, 1)} × ${zahl(h, 1)} mm` : `${zahl(laenge, 1)} mm`;
+  }
+  return [bild, el("span", { class: "teil-name" }, x.name), masse];
 }
 
 // ---------------------------------------------------------------- Eigenschaften
@@ -793,14 +957,29 @@ function pfadFelder(f: Extract<Form, { art: "pfad" }>): HTMLElement[] {
 
 function musterFelder(): HTMLElement[] {
   const d = muster().druck;
-  return [
-    el("h2", {}, t("druck")),
-    auswahlFeld(t("druck.papier"), d.papier, [["a4", "A4"], ["a3", "A3"], ["letter", "US Letter"]], (x) => aendern((m) => (m.druck.papier = x))),
+  const papiere: [Druck["papier"], string][] = [["a4", "A4"], ["a3", "A3"], ["letter", "US Letter"]];
+  // Druckeinstellungen braucht man erst beim Export: zugeklappt mit
+  // Zusammenfassung, damit die Nähanleitung oben steht.
+  const druck = el(
+    "details",
+    { class: "druck" },
+    el(
+      "summary",
+      {},
+      el("span", { class: "druck-titel" }, t("druck")),
+      el("span", { class: "druck-werte" }, t("druck.zusammenfassung", { p: papiere.find(([v]) => v === d.papier)?.[1] ?? d.papier, r: zahl(d.rand), k: zahl(d.klebekante) })),
+    ),
+    auswahlFeld(t("druck.papier"), d.papier, papiere, (x) => aendern((m) => (m.druck.papier = x))),
     zahlFeld(t("druck.rand"), d.rand, (x) => aendern((m) => (m.druck.rand = x))),
     zahlFeld(t("druck.klebekante"), d.klebekante, (x) => aendern((m) => (m.druck.klebekante = x))),
-    ...anleitungFelder(),
-  ];
+  );
+  druck.open = druckOffen;
+  druck.addEventListener("toggle", () => (druckOffen = druck.open));
+  return [...anleitungFelder(), druck];
 }
+
+/** Druckeinstellungen aufgeklappt (bleibt beim Neuaufbau erhalten). */
+let druckOffen = false;
 
 function anleitungFelder(): HTMLElement[] {
   const a = muster().anleitung;
@@ -862,7 +1041,7 @@ async function skizzeSetzen(g: Teil, bedingungen: Bedingung[], fokus: number | n
     melden(e.freiheitsgrade === 0 ? t("skizze.bestimmt") : freiText(e.freiheitsgrade));
     return true;
   } catch (err) {
-    melden(fehlertext(String(err)));
+    fehlerMelden(err);
     eigenschaftenAktualisieren();
     neuZeichnen();
     return false;
@@ -1233,7 +1412,7 @@ async function abstandSetzen(g: Teil, masse: Abstandsmass[], fokus: number | nul
     melden(e.freiheitsgrade === 0 ? t("abstand.bestimmt") : t("abstand.frei"));
     return true;
   } catch (err) {
-    melden(fehlertext(String(err)));
+    fehlerMelden(err);
     eigenschaftenAktualisieren();
     neuZeichnen();
     return false;
@@ -1275,7 +1454,7 @@ async function ausstanzen(g: Teil, zielId: number): Promise<void> {
   try {
     await pfadeFuer(versuch);
   } catch (e) {
-    melden(fehlertext(String(e)));
+    fehlerMelden(e);
     return;
   }
   aendern((m) => {
@@ -1434,24 +1613,41 @@ function montageFelder(g: Teil): HTMLElement[] {
 
 async function vorlageEinsetzen(): Promise<void> {
   try {
-    const v = await vorlageLaden("bifold");
-    aendern((m) => {
-      const teile: Teil[] = [];
-      for (const x of v.teile) {
-        teile.push({ id: neueId({ ...m, teile }), name: x.name ?? "", form: x.form, x: x.x, y: x.y, naht: x.stiche, montage: x.montage });
-      }
-      m.teile = teile;
-      m.anleitung = v.schritte;
-    });
-    auswahl = null;
-    // Erst die Geometrie, dann passt „Alles zeigen“.
-    await Promise.all(muster().teile.map(pfadeFuer));
-    ansicht.allesZeigen(muster(), zusammenbau);
-    melden(t("vorlage.geladen"));
-    allesAktualisieren();
+    await vorlageAnwenden(await vorlageLaden("bifold"), t("vorlage.bifold.name"), t("vorlage.geladen"));
   } catch (e) {
-    melden(fehlertext(String(e)));
+    fehlerMelden(e);
   }
+}
+
+/** Ersetzt das Muster durch eine Vorlage (rückgängig machbar). */
+async function vorlageAnwenden(v: Vorlage, name: string, meldung: string): Promise<void> {
+  aendern((m) => {
+    const teile: Teil[] = [];
+    for (const x of v.teile) {
+      teile.push({
+        id: neueId({ ...m, teile }),
+        name: x.name ?? "",
+        form: x.form,
+        x: x.x,
+        y: x.y,
+        naht: x.stiche,
+        montage: x.montage,
+        // Ausschnitte (z. B. Dornlöcher) heißen nach ihrer Nummer, wenn
+        // die Vorlage keinen Namen mitbringt.
+        ausschnitte: x.ausschnitte.map((a, i) => ({ ...a, name: a.name ?? t("ausschnitt.nummer", { n: i + 1 }) })),
+        abstandsmasse: x.abstandsmasse,
+      });
+    }
+    m.teile = teile;
+    m.anleitung = v.schritte;
+    m.name = name;
+  });
+  auswahl = null;
+  // Erst die Geometrie, dann passt „Alles zeigen“.
+  await Promise.all(muster().teile.map(pfadeFuer));
+  ansicht.allesZeigen(muster(), zusammenbau);
+  melden(meldung);
+  allesAktualisieren();
 }
 
 // ---------------------------------------------------------------- Zeiger
@@ -1633,7 +1829,10 @@ window.addEventListener("keydown", (e) => {
   const imFeld = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement;
   const strg = e.ctrlKey || e.metaKey;
   const taste = e.key.toLowerCase();
-  if (strg && taste === "z") {
+  if (strg && e.altKey && e.shiftKey && taste === "l") {
+    e.preventDefault();
+    if (!knopfTest.disabled) void leistungstest();
+  } else if (strg && taste === "z") {
     if (imFeld) return;
     e.preventDefault();
     if (e.shiftKey) wiederholen();
@@ -1719,7 +1918,7 @@ async function exportieren(): Promise<void> {
     const r = await pdfExportieren(muster().teile, muster().druck);
     melden(r.abgebrochen ? t("export.abgebrochen") : t("export.fertig", { d: r.datei, b: r.blaetter }));
   } catch (e) {
-    melden(fehlertext(String(e)));
+    fehlerMelden(e);
   }
 }
 
@@ -1789,7 +1988,7 @@ async function leistungstest(): Promise<void> {
     ansicht.allesZeigen(muster());
     allesAktualisieren();
   } catch (e) {
-    melden(fehlertext(String(e)));
+    fehlerMelden(e);
   } finally {
     knopfTest.disabled = false;
   }
@@ -1804,8 +2003,8 @@ knopfAlles.addEventListener("click", () => {
   neuZeichnen();
 });
 knopfMasse.addEventListener("click", masseUmschalten);
-knopfZusammenbau.addEventListener("click", zusammenbauUmschalten);
-knopfVorlage.addEventListener("click", () => void vorlageEinsetzen());
+knopfZuschnitt.addEventListener("click", () => zusammenbau && zusammenbauUmschalten());
+knopfZusammenbau.addEventListener("click", () => zusammenbau || zusammenbauUmschalten());
 knopfExport.addEventListener("click", () => void exportieren());
 knopfTest.addEventListener("click", () => void leistungstest());
 
@@ -1813,6 +2012,9 @@ new ResizeObserver(() => {
   ansicht.groesseAnpassen();
   neuZeichnen();
 }).observe(canvas);
+
+// Maßzahlen auf der Fläche erst mit der geladenen Schrift neu zeichnen.
+document.fonts.addEventListener("loadingdone", neuZeichnen);
 
 werkzeugWaehlen("auswahl");
 allesAktualisieren();

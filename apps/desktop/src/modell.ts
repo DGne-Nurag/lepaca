@@ -117,6 +117,8 @@ export interface Druck {
 }
 
 export interface Muster {
+  /** Name für die Titelzeile, z. B. aus einer Vorlage. */
+  name?: string;
   teile: Teil[];
   druck: Druck;
   /** Nahteinstellung für neue Teile: die zuletzt benutzte. */
