@@ -383,7 +383,7 @@ export class Ansicht {
         c.fill();
       }
     }
-    c.font = "12px system-ui, sans-serif";
+    c.font = `12px ${farbe("--schrift")}`;
     c.textAlign = "center";
     c.textBaseline = "middle";
     for (const m of g.masse) {
@@ -399,7 +399,7 @@ export class Ansicht {
       c.restore();
     }
     if (gewaehlt) {
-      c.font = "bold 10px system-ui, sans-serif";
+      c.font = `600 10px ${farbe("--schrift")}`;
       for (const sy of g.symbole) {
         const [x, y] = bild(sy.pos);
         c.fillStyle = farbe("--symbol");
